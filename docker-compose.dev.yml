@@ -1,0 +1,8 @@
+# Run together with ../infra/docker-compose.yml once the infra repository exists:
+# docker compose -f ../infra/docker-compose.yml -f docker-compose.dev.yml up --build
+services:
+  backend-api:
+    build: .
+    env_file: .env
+    ports:
+      - "8080:8080"
