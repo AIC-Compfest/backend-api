@@ -5,3 +5,7 @@ bin/
 coverage.out
 tmp/
 .gocache/
+storage/
+reports/
+docs/
+*.md

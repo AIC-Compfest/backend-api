@@ -5,6 +5,7 @@ import (
 	"github.com/AIC-Compfest/backend-api/internal/handler"
 	"github.com/AIC-Compfest/backend-api/internal/repository"
 	"github.com/AIC-Compfest/backend-api/internal/service"
+	"github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
 	"github.com/AIC-Compfest/backend-api/internal/storage"
 	"github.com/AIC-Compfest/backend-api/internal/supabase"
 	"github.com/gin-gonic/gin"
@@ -51,7 +52,14 @@ func New(cfg config.Config) *Application {
 	ingestionService := service.NewIngestionService(docRepo, store, cfg.AIServiceURL)
 	docHandler := handler.NewDocumentHandler(ingestionService)
 
-	// 3. API v1 Document Routes
+	reconcileEngine := reconciliation.NewEngine()
+	reviewService := reconciliation.NewReviewService(reconcileEngine)
+	_ = reviewService.SeedFromPilotDataset("../synthetic-data/dataset/v4_pilot_20")
+	_ = reviewService.SeedFromPilotDataset("d:/AIC/synthetic-data/dataset/v4_pilot_20")
+
+	reconcileHandler := handler.NewReconciliationHandler(reconcileEngine, reviewService)
+
+	// 3. API v1 Document & Reconciliation Routes
 	v1 := router.Group("/api/v1")
 	{
 		docs := v1.Group("/documents")
@@ -60,6 +68,15 @@ func New(cfg config.Config) *Application {
 			docs.GET("", docHandler.ListDocuments)
 			docs.GET("/:id", docHandler.GetDocument)
 			docs.GET("/:id/download", docHandler.Download)
+		}
+
+		reconcile := v1.Group("/reconcile")
+		{
+			reconcile.POST("", reconcileHandler.Reconcile)
+			reconcile.GET("/queue", reconcileHandler.GetQueue)
+			reconcile.GET("/:id", reconcileHandler.GetReconciliation)
+			reconcile.POST("/:id/decision", reconcileHandler.SubmitDecision)
+			reconcile.GET("/:id/dispute-package", reconcileHandler.GetDisputePackage)
 		}
 	}
 
