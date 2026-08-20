@@ -3,7 +3,7 @@ package controllers
 import (
 	"net/http"
 
-	apireconcile "github.com/AIC-Compfest/backend-api/internal/api/reconciliation"
+	apireconcile "backend-api/internal/api/reconciliation"
 	"github.com/gin-gonic/gin"
 )
 

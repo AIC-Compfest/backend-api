@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	"github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
+	"backend-api/internal/model"
+	"backend-api/internal/service/reconciliation"
 )
 
 // GroundTruthFileSchema matching synthetic-data/dataset/v4_pilot_20/transactions/TXN-*/ground_truth.json

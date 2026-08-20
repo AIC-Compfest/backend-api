@@ -267,6 +267,10 @@ const (
 	StatusMissing              ReconciliationStatus = "MISSING"
 	StatusDuplicate            ReconciliationStatus = "DUPLICATE"
 	StatusInsufficientEvidence ReconciliationStatus = "INSUFFICIENT_EVIDENCE"
+	StatusApproved             ReconciliationStatus = "APPROVED"
+	StatusDisputed             ReconciliationStatus = "DISPUTED"
+	StatusRejected             ReconciliationStatus = "REJECTED"
+	StatusResolved             ReconciliationStatus = "RESOLVED"
 )
 
 // MatchMethod tracks the entity resolution tier used.

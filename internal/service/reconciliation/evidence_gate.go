@@ -1,7 +1,7 @@
 package reconciliation
 
 import (
-	"github.com/AIC-Compfest/backend-api/internal/model"
+	"backend-api/internal/model"
 )
 
 // EvidenceQualityConfig holds threshold parameters for evidence evaluation.

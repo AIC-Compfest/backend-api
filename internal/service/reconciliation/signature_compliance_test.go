@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	"github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
+	"backend-api/internal/model"
+	"backend-api/internal/service/reconciliation"
 )
 
 // TestSignatureComplianceSuite verifies the business logic of CHECK_07 and CHECK_08

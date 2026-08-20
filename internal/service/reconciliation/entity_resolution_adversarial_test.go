@@ -3,8 +3,8 @@ package reconciliation_test
 import (
 	"testing"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	"github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
+	"backend-api/internal/model"
+	"backend-api/internal/service/reconciliation"
 )
 
 func TestEntityResolution_AdversarialSuite(t *testing.T) {

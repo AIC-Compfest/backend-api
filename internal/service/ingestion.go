@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	"github.com/AIC-Compfest/backend-api/internal/repository"
-	"github.com/AIC-Compfest/backend-api/internal/storage"
+	"backend-api/internal/model"
+	"backend-api/internal/repository"
+	"backend-api/internal/storage"
 )
 
 // Allowed extensions and max file size (25 MB)

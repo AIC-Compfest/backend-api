@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
+	"backend-api/internal/model"
 )
 
 // Engine is the central deterministic 3-way & 4-way reconciliation service (PRD §25–§34).

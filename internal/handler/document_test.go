@@ -8,9 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/AIC-Compfest/backend-api/internal/repository"
-	"github.com/AIC-Compfest/backend-api/internal/service"
-	"github.com/AIC-Compfest/backend-api/internal/storage"
+	"backend-api/internal/repository"
+	"backend-api/internal/service"
+	"backend-api/internal/storage"
 	"github.com/gin-gonic/gin"
 )
 

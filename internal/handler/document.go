@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/AIC-Compfest/backend-api/internal/service"
+	"backend-api/internal/service"
 	"github.com/gin-gonic/gin"
 )
 

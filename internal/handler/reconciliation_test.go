@@ -7,11 +7,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/AIC-Compfest/backend-api/internal/app"
-	"github.com/AIC-Compfest/backend-api/internal/config"
-	"github.com/AIC-Compfest/backend-api/internal/handler"
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	"github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
+	"backend-api/internal/app"
+	"backend-api/internal/config"
+	"backend-api/internal/handler"
+	"backend-api/internal/model"
+	"backend-api/internal/service/reconciliation"
 )
 
 func TestReconciliationEndpoints(t *testing.T) {

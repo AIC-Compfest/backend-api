@@ -5,8 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/AIC-Compfest/backend-api/internal/config"
-	"github.com/AIC-Compfest/backend-api/internal/supabase"
+	"backend-api/internal/config"
+	"backend-api/internal/supabase"
 	"github.com/gin-gonic/gin"
 )
 

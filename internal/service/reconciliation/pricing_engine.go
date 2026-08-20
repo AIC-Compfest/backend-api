@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
+	"backend-api/internal/model"
 )
 
 // PricingConfig holds monetary tolerances and VAT policies.

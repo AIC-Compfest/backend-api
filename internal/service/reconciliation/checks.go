@@ -5,7 +5,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
+	"backend-api/internal/model"
 )
 
 // Checker executes the 13 independent reconciliation checks (PRD §30–§31).

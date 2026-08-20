@@ -7,10 +7,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	apireconcile "github.com/AIC-Compfest/backend-api/internal/api/reconciliation"
-	"github.com/AIC-Compfest/backend-api/internal/api/reconciliation/controllers"
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	reconcilesvc "github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
+	apireconcile "backend-api/internal/api/reconciliation"
+	"backend-api/internal/api/reconciliation/controllers"
+	"backend-api/internal/model"
+	reconcilesvc "backend-api/internal/service/reconciliation"
 	"github.com/gin-gonic/gin"
 )
 

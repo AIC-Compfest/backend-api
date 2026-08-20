@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/AIC-Compfest/backend-api/internal/supabase"
+	"backend-api/internal/supabase"
 )
 
 // RESTRepository consumes the RPC and table contract provisioned by infra/supabase.

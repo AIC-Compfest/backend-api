@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	"github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
+	"backend-api/internal/model"
+	"backend-api/internal/service/reconciliation"
 )
 
 // GroundTruthSchema maps the ground_truth.json format in dataset

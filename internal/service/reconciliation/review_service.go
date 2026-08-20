@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
+	"backend-api/internal/model"
 )
 
 // DecisionRequest payload for reviewer actions
@@ -291,6 +291,10 @@ func (s *ReviewService) GetQueue(statusFilter, severityFilter, vendorFilter, sea
 			priorityLevel = "MEDIUM"
 		}
 
+		if severityFilter != "" && severityFilter != "ALL" && !strings.EqualFold(priorityLevel, severityFilter) {
+			continue
+		}
+
 		items = append(items, QueueItem{
 			EventID:                ev.EventID,
 			TransactionID:          ev.ShipmentID,
@@ -386,15 +390,15 @@ func (s *ReviewService) SubmitDecision(eventID string, req DecisionRequest) (*mo
 
 	switch action {
 	case "APPROVE":
-		newStatus = string(model.StatusMatch)
-		ev.Reconciliation.Status = model.StatusMatch
+		newStatus = string(model.StatusApproved)
+		ev.Reconciliation.Status = model.StatusApproved
 		ev.Reconciliation.RequiresHumanReview = false
 	case "DISPUTE":
-		newStatus = "DISPUTE_SUBMITTED"
-		ev.Reconciliation.Status = model.StatusException
+		newStatus = string(model.StatusDisputed)
+		ev.Reconciliation.Status = model.StatusDisputed
 	case "REJECT":
-		newStatus = "INVOICE_REJECTED"
-		ev.Reconciliation.Status = model.StatusException
+		newStatus = string(model.StatusRejected)
+		ev.Reconciliation.Status = model.StatusRejected
 	}
 
 	auditEntry := model.AuditTrailItem{

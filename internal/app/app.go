@@ -1,13 +1,25 @@
 package app
 
 import (
-	"github.com/AIC-Compfest/backend-api/internal/config"
-	"github.com/AIC-Compfest/backend-api/internal/handler"
-	"github.com/AIC-Compfest/backend-api/internal/repository"
-	"github.com/AIC-Compfest/backend-api/internal/service"
-	"github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
-	"github.com/AIC-Compfest/backend-api/internal/storage"
-	"github.com/AIC-Compfest/backend-api/internal/supabase"
+	"backend-api/internal/audit"
+	auditControllers "backend-api/internal/audit/controllers"
+	"backend-api/internal/config"
+	"backend-api/internal/contract"
+	contractControllers "backend-api/internal/contract/controllers"
+	"backend-api/internal/database"
+	"backend-api/internal/document"
+	documentControllers "backend-api/internal/document/controllers"
+	"backend-api/internal/handler"
+	"backend-api/internal/reconciliation"
+	reconciliationControllers "backend-api/internal/reconciliation/controllers"
+	"backend-api/internal/settings"
+	settingsControllers "backend-api/internal/settings/controllers"
+	"backend-api/internal/storage"
+	"backend-api/internal/supabase"
+	"backend-api/internal/user"
+	userControllers "backend-api/internal/user/controllers"
+	"os"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -34,12 +46,12 @@ func New(cfg config.Config) *Application {
 		c.Next()
 	})
 
-	// 1. Health Handlers
-	health := handler.NewHealthHandler(cfg, supabase.NewClient(cfg.SupabaseURL, cfg.SupabasePublishableKey))
-	router.GET("/healthz", health.Liveness)
-	router.GET("/readyz", health.Readiness)
+	// 1. Database & Storage Infrastructure
+	var dbClient *database.Client
+	if cfg.SupabaseURL != "" && cfg.SupabaseServiceRoleKey != "" {
+		dbClient = database.NewClient(cfg.SupabaseURL, cfg.SupabaseServiceRoleKey)
+	}
 
-	// 2. Storage & Repository Setup
 	localStorage, _ := storage.NewLocalStorage("storage")
 	var store storage.Storage
 	if cfg.SupabaseURL != "" && cfg.SupabaseServiceRoleKey != "" {
@@ -48,36 +60,51 @@ func New(cfg config.Config) *Application {
 		store = localStorage
 	}
 
-	docRepo := repository.NewMemoryDocumentRepository()
-	ingestionService := service.NewIngestionService(docRepo, store, cfg.AIServiceURL)
-	docHandler := handler.NewDocumentHandler(ingestionService)
+	// 2. Health Check Probes
+	health := handler.NewHealthHandler(cfg, supabase.NewClient(cfg.SupabaseURL, cfg.SupabasePublishableKey))
+	router.GET("/healthz", health.Liveness)
+	router.GET("/readyz", health.Readiness)
 
-	reconcileEngine := reconciliation.NewEngine()
-	reviewService := reconciliation.NewReviewService(reconcileEngine)
-	_ = reviewService.SeedFromPilotDataset("../synthetic-data/dataset/v4_pilot_20")
-	_ = reviewService.SeedFromPilotDataset("d:/AIC/synthetic-data/dataset/v4_pilot_20")
+	// 3. Domain Modular MVC Resources
+	// User Resource
+	userDB := user.NewResourceDB(dbClient)
+	userRes := user.NewResource(userDB, "aic-enterprise-auth-secret-key-2026")
 
-	reconcileHandler := handler.NewReconciliationHandler(reconcileEngine, reviewService)
+	// Contract Resource
+	contractDB := contract.NewResourceDB(dbClient)
+	contractRes := contract.NewResource(contractDB)
 
-	// 3. API v1 Document & Reconciliation Routes
+	// Settings Resource
+	settingsDB := settings.NewResourceDB(dbClient)
+	settingsRes := settings.NewResource(settingsDB)
+
+	// Audit Resource
+	auditDB := audit.NewResourceDB(dbClient)
+	auditRes := audit.NewResource(auditDB)
+
+	// Reconciliation Resource
+	reconDB := reconciliation.NewResourceDB(dbClient)
+	if os.Getenv("SEED_ON_STARTUP") == "true" {
+		_ = reconDB.SeedFromPilotDataset("../synthetic-data/dataset/v4_pilot_20")
+		_ = reconDB.SeedFromPilotDataset("d:/AIC/synthetic-data/dataset/v4_pilot_20")
+	}
+	reconRes := reconciliation.NewResource(reconDB, nil)
+
+	// Document Resource
+	docDB := document.NewResourceDB(dbClient)
+	docRes := document.NewResource(docDB, store)
+	docRes.SetEventSink(reconDB)
+	docRes.SetAIServiceURL(cfg.AIServiceURL)
+
+	// 4. Register API v1 Modular Routes
 	v1 := router.Group("/api/v1")
 	{
-		docs := v1.Group("/documents")
-		{
-			docs.POST("/upload", docHandler.Upload)
-			docs.GET("", docHandler.ListDocuments)
-			docs.GET("/:id", docHandler.GetDocument)
-			docs.GET("/:id/download", docHandler.Download)
-		}
-
-		reconcile := v1.Group("/reconcile")
-		{
-			reconcile.POST("", reconcileHandler.Reconcile)
-			reconcile.GET("/queue", reconcileHandler.GetQueue)
-			reconcile.GET("/:id", reconcileHandler.GetReconciliation)
-			reconcile.POST("/:id/decision", reconcileHandler.SubmitDecision)
-			reconcile.GET("/:id/dispute-package", reconcileHandler.GetDisputePackage)
-		}
+		userControllers.RegisterRoutes(v1, userRes)
+		documentControllers.RegisterRoutes(v1, docRes)
+		contractControllers.RegisterRoutes(v1, contractRes)
+		settingsControllers.RegisterRoutes(v1, settingsRes)
+		auditControllers.RegisterRoutes(v1, auditRes)
+		reconciliationControllers.RegisterRoutes(v1, reconRes)
 	}
 
 	return &Application{config: cfg, router: router}

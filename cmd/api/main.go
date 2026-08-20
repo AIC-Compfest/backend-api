@@ -4,8 +4,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/AIC-Compfest/backend-api/internal/app"
-	"github.com/AIC-Compfest/backend-api/internal/config"
+	"backend-api/internal/app"
+	"backend-api/internal/config"
 )
 
 func main() {

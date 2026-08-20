@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
+	"backend-api/internal/model"
 )
 
 // CompiledContract is the immutable executable rate card compiled from canonical RateAgreement (PRD §28).

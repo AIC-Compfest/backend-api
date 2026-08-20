@@ -144,7 +144,12 @@ func (s *SupabaseStorage) Open(ctx context.Context, storagePath string) (io.Read
 		return nil, fmt.Errorf("storage not configured")
 	}
 
-	url := fmt.Sprintf("%s/storage/v1/object/public/%s", s.supabaseURL, storagePath)
+	cleanPath := strings.TrimPrefix(storagePath, "/")
+	if !strings.HasPrefix(cleanPath, "documents-original/") {
+		cleanPath = "documents-original/" + cleanPath
+	}
+
+	url := fmt.Sprintf("%s/storage/v1/object/authenticated/%s", s.supabaseURL, cleanPath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -158,6 +163,15 @@ func (s *SupabaseStorage) Open(ctx context.Context, storagePath string) (io.Read
 	}
 	if resp.StatusCode >= 300 {
 		resp.Body.Close()
+		altURL := fmt.Sprintf("%s/storage/v1/object/%s", s.supabaseURL, cleanPath)
+		altReq, altErr := http.NewRequestWithContext(ctx, http.MethodGet, altURL, nil)
+		if altErr == nil {
+			altReq.Header.Set("Authorization", "Bearer "+s.serviceRoleKey)
+			altReq.Header.Set("apikey", s.serviceRoleKey)
+			if altResp, err := s.httpClient.Do(altReq); err == nil && altResp.StatusCode < 300 {
+				return altResp.Body, nil
+			}
+		}
 		return nil, fmt.Errorf("failed to fetch from supabase storage: HTTP %d", resp.StatusCode)
 	}
 	return resp.Body, nil

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
+	"backend-api/internal/model"
 )
 
 // DocumentRepository defines database operations for documents.

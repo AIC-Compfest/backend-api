@@ -1,4 +1,4 @@
-module github.com/AIC-Compfest/backend-api
+module backend-api
 
 go 1.25.0
 

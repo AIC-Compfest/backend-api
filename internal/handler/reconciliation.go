@@ -3,8 +3,8 @@ package handler
 import (
 	"net/http"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	"github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
+	"backend-api/internal/model"
+	"backend-api/internal/service/reconciliation"
 	"github.com/gin-gonic/gin"
 )
 

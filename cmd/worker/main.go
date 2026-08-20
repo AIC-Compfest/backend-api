@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/config"
-	"github.com/AIC-Compfest/backend-api/internal/jobs"
-	"github.com/AIC-Compfest/backend-api/internal/supabase"
+	"backend-api/internal/config"
+	"backend-api/internal/jobs"
+	"backend-api/internal/supabase"
 )
 
 func main() {

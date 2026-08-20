@@ -1,0 +1,344 @@
+package reconciliation
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"backend-api/internal/model"
+	serviceRecon "backend-api/internal/service/reconciliation"
+)
+
+// Resource orchestrates reconciliation logic, queue prioritization, and dispute management
+type Resource struct {
+	db     *ResourceDB
+	engine *serviceRecon.Engine
+}
+
+// NewResource creates a reconciliation Resource instance
+func NewResource(db *ResourceDB, engine *serviceRecon.Engine) *Resource {
+	if engine == nil {
+		engine = serviceRecon.NewEngine()
+	}
+	return &Resource{
+		db:     db,
+		engine: engine,
+	}
+}
+
+// Reconcile executes 4-way matching and persists the result
+func (r *Resource) Reconcile(ctx context.Context, inv *model.InvoiceCanonical, shp *model.ShipmentCanonical, pod *model.PODCanonical, ctr *model.ContractCanonical) (*model.ShipmentEvent, error) {
+	event, err := r.engine.ReconcileTransaction(inv, shp, pod, ctr)
+	if err != nil {
+		return nil, fmt.Errorf("reconciliation engine error: %w", err)
+	}
+
+	if err := r.db.SaveEvent(ctx, event); err != nil {
+		return nil, fmt.Errorf("failed to persist event: %w", err)
+	}
+
+	return event, nil
+}
+
+// GetQueue retrieves filtered and paginated queue items
+func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResponseDTO, error) {
+	events, err := r.db.ListAllEvents(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var items []QueueItemDTO
+	summary := QueueSummaryDTO{}
+
+	for _, ev := range events {
+		billed := float64(ev.Invoice.BilledAmount)
+		expected := float64(ev.Pricing.ExpectedTotalCharge)
+		variance := float64(ev.Pricing.DifferenceAmount)
+
+		summary.TotalItems++
+		summary.TotalInvoicesCount++
+		summary.TotalBilledIDR += billed
+		summary.TotalInvoicedAmount += billed
+		summary.TotalVarianceIDR += variance
+		summary.TotalVarianceAmount += variance
+
+		topDiscrepancy := ""
+		severity := "LOW"
+		if len(ev.Reconciliation.Discrepancies) > 0 {
+			topDiscrepancy = fmt.Sprintf("[%s] %s", ev.Reconciliation.Discrepancies[0].Code, ev.Reconciliation.Discrepancies[0].Description)
+			severity = string(ev.Reconciliation.Discrepancies[0].Severity)
+		}
+
+		statusStr := string(ev.Reconciliation.Status)
+		if statusStr == "MATCH" {
+			summary.CleanMatchesCount++
+			summary.MatchesCount++
+		} else if statusStr == "EXCEPTION" {
+			summary.OpenExceptionsCount++
+			summary.UrgentDisputesCount++
+		} else {
+			summary.ResolvedCount++
+			if variance > 0 {
+				summary.LeakagePreventedIDR += variance
+			}
+		}
+
+		// Apply Filters
+		if filter.Status != "" && !strings.EqualFold(statusStr, filter.Status) {
+			continue
+		}
+		if filter.Severity != "" && !strings.EqualFold(severity, filter.Severity) {
+			continue
+		}
+		if filter.Vendor != "" && !strings.Contains(strings.ToLower(ev.VendorID), strings.ToLower(filter.Vendor)) {
+			continue
+		}
+		if filter.Search != "" {
+			query := strings.ToLower(filter.Search)
+			match := strings.Contains(strings.ToLower(ev.EventID), query) ||
+				strings.Contains(strings.ToLower(ev.ShipmentID), query) ||
+				strings.Contains(strings.ToLower(ev.Invoice.InvoiceNumber), query) ||
+				strings.Contains(strings.ToLower(ev.VendorID), query)
+			if !match {
+				continue
+			}
+		}
+
+		createdAtStr := ev.Invoice.InvoiceDate
+		if createdAtStr == "" {
+			createdAtStr = time.Now().Format("2006-01-02")
+		}
+
+		vendorName := ev.VendorID
+		if strings.Contains(ev.VendorID, "001") {
+			vendorName = "PT Cepat Logistik Nusantara"
+		} else if strings.Contains(ev.VendorID, "002") {
+			vendorName = "PT Trans Express Indonesia"
+		} else if strings.Contains(ev.VendorID, "003") {
+			vendorName = "PT Kargo Andalan Utama"
+		} else if strings.Contains(ev.VendorID, "004") {
+			vendorName = "PT Sinar Logistik Mandiri"
+		} else if strings.Contains(ev.VendorID, "005") {
+			vendorName = "PT Aruna Freight Solusi"
+		}
+
+		items = append(items, QueueItemDTO{
+			EventID:        ev.EventID,
+			TransactionID:  ev.EventID,
+			ShipmentID:     ev.ShipmentID,
+			InvoiceNumber:  ev.Invoice.InvoiceNumber,
+			VendorID:       ev.VendorID,
+			VendorName:     vendorName,
+			BilledAmount:   billed,
+			ExpectedAmount: expected,
+			VarianceAmount: variance,
+			MatchScore:     ev.MatchConfidence,
+			PriorityScore:  ev.Reconciliation.PriorityScore,
+			Status:             statusStr,
+			Severity:           severity,
+			PrimaryDiscrepancy: topDiscrepancy,
+			TopDiscrepancy:     topDiscrepancy,
+			CreatedAt:          createdAtStr,
+		})
+	}
+
+	// Sort by PriorityScore descending
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].PriorityScore > items[j].PriorityScore
+	})
+
+	total := int64(len(items))
+	page := filter.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := filter.PageSize
+	if pageSize < 1 {
+		pageSize = 100
+	}
+
+	offset := (page - 1) * pageSize
+	totalPages := int(total) / pageSize
+	if int(total)%pageSize != 0 || totalPages == 0 {
+		totalPages++
+	}
+
+	paginatedItems := []QueueItemDTO{}
+	if offset < len(items) {
+		end := offset + pageSize
+		if end > len(items) {
+			end = len(items)
+		}
+		paginatedItems = items[offset:end]
+	}
+
+	return &QueueResponseDTO{
+		Summary:    summary,
+		Items:      paginatedItems,
+		Total:      total,
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}, nil
+}
+
+// GetDetail retrieves full shipment event details
+func (r *Resource) GetDetail(ctx context.Context, id string) (*model.ShipmentEvent, error) {
+	return r.db.GetEventByID(ctx, id)
+}
+
+// SubmitDecision records a human review decision and updates case status
+func (r *Resource) SubmitDecision(ctx context.Context, eventID string, req DecisionRequest) (*DecisionResponse, error) {
+	ev, err := r.db.GetEventByID(ctx, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("reconciliation event '%s' not found: %w", eventID, err)
+	}
+
+	prevStatus := string(ev.Reconciliation.Status)
+	action := strings.ToUpper(strings.TrimSpace(req.Decision))
+	if action == "" {
+		action = strings.ToUpper(strings.TrimSpace(req.Action))
+	}
+
+	if (action == "DISPUTE" || action == "REJECT") && strings.TrimSpace(req.Reason) == "" {
+		return nil, fmt.Errorf("written reason is mandatory for %s action", action)
+	}
+
+	role := strings.ToUpper(strings.TrimSpace(req.Role))
+	if role == "" {
+		role = strings.ToUpper(strings.TrimSpace(req.ReviewerRole))
+	}
+	if role == "" {
+		role = "AP_MANAGER"
+	}
+	validRoles := map[string]bool{
+		"AP_MANAGER":         true,
+		"FINANCE_CONTROLLER": true,
+		"LOGISTICS_MANAGER":  true,
+		"AUDITOR":            true,
+		"ADMIN":              true,
+	}
+	if !validRoles[role] {
+		return nil, fmt.Errorf("invalid reviewer role '%s'. Allowed: AP_MANAGER, FINANCE_CONTROLLER, LOGISTICS_MANAGER, AUDITOR", req.Role)
+	}
+
+	var newStatus string
+	switch action {
+	case "APPROVE":
+		newStatus = "APPROVED"
+	case "REJECT":
+		newStatus = "REJECTED"
+	case "DISPUTE":
+		newStatus = "DISPUTED"
+	case "OVERRIDE":
+		newStatus = "REVIEWED"
+	default:
+		return nil, fmt.Errorf("unsupported decision action '%s'. Allowed: APPROVE, REJECT, DISPUTE, OVERRIDE", action)
+	}
+
+	now := time.Now().UTC()
+	auditItem := model.AuditTrailItem{
+		Timestamp:      now,
+		Action:         action,
+		ActorID:        req.ReviewerID,
+		ActorRole:      req.Role,
+		PreviousStatus: prevStatus,
+		NewStatus:      newStatus,
+		Notes:          req.Reason,
+	}
+
+	auditEntry, err := r.db.SaveDecision(ctx, eventID, auditItem, prevStatus, newStatus)
+	if err != nil {
+		return nil, fmt.Errorf("failed to record decision: %w", err)
+	}
+
+	return &DecisionResponse{
+		EventID:        eventID,
+		PreviousStatus: prevStatus,
+		NewStatus:      newStatus,
+		Decision:       *auditEntry,
+		AuditLogID:     model.NewUUID(),
+		Timestamp:      now,
+	}, nil
+}
+
+// GetDisputePackage generates an official dispute claim package citing contractual clauses
+func (r *Resource) GetDisputePackage(ctx context.Context, eventID string, reviewerID string) (*DisputePackageDTO, error) {
+	ev, err := r.db.GetEventByID(ctx, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("event not found: %w", err)
+	}
+
+	memo := r.formatDisputeMemo(ev, reviewerID)
+
+	vendorName := ev.VendorID
+	if strings.Contains(ev.VendorID, "001") {
+		vendorName = "PT Cepat Logistik Nusantara"
+	} else if strings.Contains(ev.VendorID, "002") {
+		vendorName = "PT Trans Express Indonesia"
+	} else if strings.Contains(ev.VendorID, "003") {
+		vendorName = "PT Kargo Andalan Utama"
+	}
+
+	return &DisputePackageDTO{
+		EventID:          ev.EventID,
+		TransactionID:    ev.EventID,
+		VendorName:       vendorName,
+		VendorID:         ev.VendorID,
+		InvoiceNumber:    ev.Invoice.InvoiceNumber,
+		ShipmentID:       ev.ShipmentID,
+		BilledAmount:     float64(ev.Invoice.BilledAmount),
+		ExpectedAmount:   float64(ev.Pricing.ExpectedTotalCharge),
+		DisputedAmount:   float64(ev.Pricing.DifferenceAmount),
+		GeneratedAt:      time.Now().UTC(),
+		GeneratedBy:      reviewerID,
+		DiscrepancyItems: ev.Reconciliation.Discrepancies,
+		FormattedMemo:    memo,
+	}, nil
+}
+
+func (r *Resource) formatDisputeMemo(ev *model.ShipmentEvent, reviewer string) string {
+	var sb strings.Builder
+	sb.WriteString("================================================================================\n")
+	sb.WriteString("              SURAT SANGGAHAN TAGIHAN LOGISTIK 3PL (OFFICIAL DISPUTE MEMO)      \n")
+	sb.WriteString("================================================================================\n\n")
+	sb.WriteString(fmt.Sprintf("NOMOR KASUS     : %s\n", ev.EventID))
+	sb.WriteString(fmt.Sprintf("TANGGAL KLAIM   : %s\n", time.Now().Format("02 January 2006")))
+	sb.WriteString(fmt.Sprintf("VENDOR 3PL      : %s\n", ev.VendorID))
+	sb.WriteString(fmt.Sprintf("NOMOR INVOICE   : %s\n", ev.Invoice.InvoiceNumber))
+	sb.WriteString(fmt.Sprintf("NOMOR SHIPMENT  : %s\n", ev.ShipmentID))
+	sb.WriteString(fmt.Sprintf("AUDITOR / AP    : %s\n\n", reviewer))
+	sb.WriteString("--------------------------------------------------------------------------------\n")
+	sb.WriteString("RINCIAN REKONSILIASI KEUANGAN:\n")
+	sb.WriteString(fmt.Sprintf(" - Total Ditagihkan Vendor : Rp %s\n", formatIDR(float64(ev.Invoice.BilledAmount))))
+	sb.WriteString(fmt.Sprintf(" - Total Seharusnya (PKS)  : Rp %s\n", formatIDR(float64(ev.Pricing.ExpectedTotalCharge))))
+	sb.WriteString(fmt.Sprintf(" - NILAI SELISIH SANGGAHAN : Rp %s\n\n", formatIDR(float64(ev.Pricing.DifferenceAmount))))
+	sb.WriteString("DASAR PERHITUNGAN SISTEM:\n")
+	sb.WriteString(fmt.Sprintf(" %s\n\n", ev.Pricing.Trace.TraceLog))
+	sb.WriteString("DAFTAR TEMUAN DISKREPANSI:\n")
+	for i, d := range ev.Reconciliation.Discrepancies {
+		delta := int64(0)
+		if d.DeltaAmount != nil {
+			delta = *d.DeltaAmount
+		}
+		sb.WriteString(fmt.Sprintf(" %d. [%s] %s (Dampak Finansial: Rp %s)\n", i+1, d.Code, d.Description, formatIDR(float64(delta))))
+	}
+	sb.WriteString("\n--------------------------------------------------------------------------------\n")
+	sb.WriteString("Permohonan: Mohon dilakukan penyesuaian (Credit Note / Invoice Revision) sejumlah nilai selisih.\n")
+	sb.WriteString("================================================================================\n")
+	return sb.String()
+}
+
+func formatIDR(val float64) string {
+	s := fmt.Sprintf("%.0f", val)
+	var res []rune
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			res = append(res, '.')
+		}
+		res = append(res, c)
+	}
+	return string(res)
+}

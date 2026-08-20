@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AIC-Compfest/backend-api/internal/repository"
-	"github.com/AIC-Compfest/backend-api/internal/storage"
+	"backend-api/internal/repository"
+	"backend-api/internal/storage"
 )
 
 func TestIngestionService_IngestAndDeduplicate(t *testing.T) {

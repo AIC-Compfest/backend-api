@@ -3,9 +3,9 @@ package reconciliation_test
 import (
 	"testing"
 
-	apireconcile "github.com/AIC-Compfest/backend-api/internal/api/reconciliation"
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	reconcilesvc "github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
+	apireconcile "backend-api/internal/api/reconciliation"
+	"backend-api/internal/model"
+	reconcilesvc "backend-api/internal/service/reconciliation"
 )
 
 func setupTestResource() *apireconcile.Resource {

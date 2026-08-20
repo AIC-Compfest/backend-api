@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
-	reconcilesvc "github.com/AIC-Compfest/backend-api/internal/service/reconciliation"
+	"backend-api/internal/model"
+	reconcilesvc "backend-api/internal/service/reconciliation"
 )
 
 // Resource coordinates reconciliation business logic, state transitions, and audit trails.

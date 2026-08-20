@@ -3,7 +3,7 @@ package reconciliation
 import (
 	"time"
 
-	"github.com/AIC-Compfest/backend-api/internal/model"
+	"backend-api/internal/model"
 )
 
 // ReconcileRequestDTO represents the incoming payload for POST /api/v1/reconcile
