@@ -8,9 +8,9 @@ import (
 	"os"
 
 	"backend-api/internal/config"
-	"backend-api/internal/contract"
 	"backend-api/internal/database"
 )
+
 
 func main() {
 	fmt.Println("================================================================")
@@ -42,10 +42,11 @@ func main() {
 		"surat_jalans",
 		"pods",
 		"documents",
+		"pricing_rules",
+		"rate_agreements",
 	}
 
-
-	fmt.Println("\n1. Mengosongkan data transaksi, kasus, dokumen, dan audit log...")
+	fmt.Println("\n1. Mengosongkan data transaksi, kasus, dokumen, dan seluruh master rate agreement...")
 	for _, table := range tablesToWipe {
 		params := url.Values{}
 		// PostgREST delete all: id not null
@@ -58,12 +59,8 @@ func main() {
 		}
 	}
 
-	fmt.Println("\n2. Memverifikasi Master Kontrak 3PL (Tetap Dipertahankan)...")
-	contractDB := contract.NewResourceDB(dbClient)
-	contractsList, _ := contractDB.ListAll(ctx)
-	fmt.Printf("   ✓ %d Master PKS 3PL tetap aktif di Supabase\n", len(contractsList))
-
 	fmt.Println("\n================================================================")
-	fmt.Println("✅ DATABASE BERHASIL DI-RESET! Sistem bersih & siap mulai dari Register.")
+	fmt.Println("✅ DATABASE BERHASIL DI-RESET TOTAL! Siap daftarkan PT baru dari dokumen.")
 	fmt.Println("================================================================")
 }
+

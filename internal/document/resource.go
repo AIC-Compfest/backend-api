@@ -432,6 +432,36 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		})
 	}
 
+	if ctrCanon != nil {
+		vendorName := ctrCanon.VendorID
+		if invCanon != nil && invCanon.VendorName != "" {
+			vendorName = invCanon.VendorName
+		}
+		effFrom := ctrCanon.EffectiveFrom
+		if effFrom == "" {
+			effFrom = "2026-01-01"
+		}
+		effTo := ctrCanon.EffectiveTo
+		if effTo == "" {
+			effTo = "2026-12-31"
+		}
+		_ = r.db.InsertRateAgreement(ctx, map[string]interface{}{
+			"id":                     model.NewUUID(),
+			"document_id":            doc.ID,
+			"agreement_id":           ctrCanon.AgreementID,
+			"vendor_id":              ctrCanon.VendorID,
+			"vendor_name":            vendorName,
+			"effective_from":         effFrom,
+			"effective_to":           effTo,
+			"currency":               "IDR",
+			"fuel_surcharge_percent": ctrCanon.ApplicableFuelSurchargePercent,
+			"minimum_charge":         ctrCanon.MinimumCharge,
+			"dispute_window_days":    ctrCanon.DisputeWindowDays,
+			"created_at":             now,
+		})
+	}
+
+
 	var reconEventID string
 
 	// Automatically Run 4-Way Matching & Register Reconciliation Event

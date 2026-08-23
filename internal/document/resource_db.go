@@ -335,6 +335,16 @@ func (r *ResourceDB) InsertPOD(ctx context.Context, payload map[string]interface
 	return nil
 }
 
+// InsertRateAgreement saves structured Rate Agreement data into rate_agreements table in Supabase
+func (r *ResourceDB) InsertRateAgreement(ctx context.Context, payload map[string]interface{}) error {
+	if r.dbClient != nil {
+		var out []map[string]interface{}
+		_ = r.dbClient.Insert(ctx, "rate_agreements", payload, &out)
+	}
+	return nil
+}
+
+
 // InsertSegment saves a document segment record into Supabase DB and local cache
 func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) error {
 	if seg.ID == "" {

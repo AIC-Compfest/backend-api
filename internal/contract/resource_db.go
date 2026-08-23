@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"net/url"
 	"sync"
-	"time"
 
 	"backend-api/internal/database"
 )
+
 
 // ResourceDB handles database operations for the contract resource
 type ResourceDB struct {
@@ -17,82 +17,14 @@ type ResourceDB struct {
 	memory   []RateAgreement
 }
 
-// NewResourceDB creates a ResourceDB instance with default rate cards
+// NewResourceDB creates a ResourceDB instance
 func NewResourceDB(dbClient *database.Client) *ResourceDB {
-	now := time.Now().UTC()
-	seedContracts := []RateAgreement{
-		{
-			ID:                   "CTR-001",
-			AgreementID:          "CTR-3PL-LOG-001-2026",
-			VendorID:             "3PL-LOG-001",
-			VendorName:           "PT Cepat Logistik Nusantara",
-			EffectiveFrom:        "2026-01-01",
-			EffectiveTo:          "2026-12-31",
-			Currency:             "IDR",
-			FuelSurchargePercent: 14.0,
-			MinimumCharge:        0,
-			DisputeWindowDays:    30,
-			CreatedAt:            now,
-		},
-		{
-			ID:                   "CTR-002",
-			AgreementID:          "CTR-3PL-LOG-002-2026",
-			VendorID:             "3PL-LOG-002",
-			VendorName:           "PT Trans Express Indonesia",
-			EffectiveFrom:        "2026-01-01",
-			EffectiveTo:          "2026-12-31",
-			Currency:             "IDR",
-			FuelSurchargePercent: 12.5,
-			MinimumCharge:        0,
-			DisputeWindowDays:    45,
-			CreatedAt:            now,
-		},
-		{
-			ID:                   "CTR-003",
-			AgreementID:          "CTR-3PL-LOG-003-2026",
-			VendorID:             "3PL-LOG-003",
-			VendorName:           "PT Kargo Andalan Utama",
-			EffectiveFrom:        "2026-02-01",
-			EffectiveTo:          "2027-01-31",
-			Currency:             "IDR",
-			FuelSurchargePercent: 15.0,
-			MinimumCharge:        0,
-			DisputeWindowDays:    30,
-			CreatedAt:            now,
-		},
-		{
-			ID:                   "CTR-004",
-			AgreementID:          "CTR-3PL-LOG-004-2026",
-			VendorID:             "3PL-LOG-004",
-			VendorName:           "PT Sinar Logistik Mandiri",
-			EffectiveFrom:        "2026-01-01",
-			EffectiveTo:          "2026-12-31",
-			Currency:             "IDR",
-			FuelSurchargePercent: 10.0,
-			MinimumCharge:        0,
-			DisputeWindowDays:    30,
-			CreatedAt:            now,
-		},
-		{
-			ID:                   "CTR-005",
-			AgreementID:          "CTR-3PL-LOG-005-2026",
-			VendorID:             "3PL-LOG-005",
-			VendorName:           "PT Aruna Freight Solusi",
-			EffectiveFrom:        "2026-03-01",
-			EffectiveTo:          "2027-02-28",
-			Currency:             "IDR",
-			FuelSurchargePercent: 13.0,
-			MinimumCharge:        0,
-			DisputeWindowDays:    30,
-			CreatedAt:            now,
-		},
-	}
-
 	return &ResourceDB{
 		dbClient: dbClient,
-		memory:   seedContracts,
+		memory:   []RateAgreement{},
 	}
 }
+
 
 // ListAll retrieves all rate agreements from Supabase DB (Source of Truth)
 func (r *ResourceDB) ListAll(ctx context.Context) ([]RateAgreement, error) {
@@ -138,3 +70,18 @@ func (r *ResourceDB) GetByID(ctx context.Context, id string) (*RateAgreement, er
 
 	return nil, fmt.Errorf("rate agreement '%s' not found", id)
 }
+
+// Insert saves a new rate agreement into Supabase DB and in-memory cache
+func (r *ResourceDB) Insert(ctx context.Context, ctr *RateAgreement) error {
+	if r.dbClient != nil {
+		var out []RateAgreement
+		_ = r.dbClient.Insert(ctx, "rate_agreements", ctr, &out)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.memory = append(r.memory, *ctr)
+	return nil
+}
+
+
