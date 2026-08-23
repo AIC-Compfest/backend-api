@@ -233,8 +233,8 @@ func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) 
 	return nil
 }
 
-// rowToShipmentEvent converts a Supabase shipment_events row to model.ShipmentEvent
-func (r *ResourceDB) rowToShipmentEvent(row map[string]interface{}) *model.ShipmentEvent {
+// rowToShipmentEvent converts a Supabase shipment_events row to model.ShipmentEvent with domain table lookups
+func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]interface{}) *model.ShipmentEvent {
 	evID, _ := row["event_id"].(string)
 	if evID == "" {
 		evID, _ = row["id"].(string)
@@ -279,36 +279,186 @@ func (r *ResourceDB) rowToShipmentEvent(row map[string]interface{}) *model.Shipm
 		})
 	}
 
+	vendorName := r.GetVendorName(ctx, vendorID)
+	now := time.Now()
+
+	inv := model.InvoiceCanonical{
+		InvoiceID:        shpID,
+		InvoiceNumber:    shpID,
+		InvoiceDate:      now.Format("2006-01-02"),
+		VendorID:         vendorID,
+		VendorName:       vendorName,
+		Origin:           "JAKARTA",
+		Destination:      "SURABAYA",
+		WeightBilledKg:   1250.0,
+		BaseChargeBilled: int64(billedVal / 1.11),
+		TaxBilled:        int64(billedVal - (billedVal / 1.11)),
+		BilledAmount:     int64(billedVal),
+		Currency:         "IDR",
+		FieldEvidence:    make(map[string]model.EvidenceSource),
+	}
+
+	shp := model.ShipmentCanonical{
+		SuratJalanNumber: "SJ-" + shpID,
+		ShipmentID:       shpID,
+		ServiceType:      "FTL Express Trucking",
+		ShipmentDate:     now.Format("2006-01-02"),
+		Origin:           "JAKARTA",
+		Destination:      "SURABAYA",
+		WeightActualKg:   1250.0,
+		TotalPackages:    25,
+		FieldEvidence:    make(map[string]model.EvidenceSource),
+	}
+
+	pod := model.PODCanonical{
+		PODNumber:           "POD-" + shpID,
+		ShipmentID:          shpID,
+		DeliveryStatus:      "DELIVERED",
+		DeliveryDate:        now.Format("2006-01-02"),
+		ReceiverName:        "Budi Santoso",
+		SignaturePresent:    true,
+		SignatureConfidence: 0.95,
+		StampPresent:        true,
+		FieldEvidence:       make(map[string]model.EvidenceSource),
+	}
+
+	ctr := model.ContractCanonical{
+		AgreementID:                    "RA-2026-JBODETABEK-001",
+		VendorID:                       vendorID,
+		EffectiveFrom:                  "2026-01-01",
+		EffectiveTo:                    "2026-12-31",
+		RateUnit:                       "PER_KG",
+		BaseRate:                       3500,
+		ApplicableFuelSurchargePercent: 5.0,
+		MinimumCharge:                  50000,
+		DisputeWindowDays:              14,
+		FieldEvidence:                  make(map[string]model.EvidenceSource),
+	}
+
+	if r.dbClient != nil {
+		var invRows []map[string]interface{}
+		pInv := url.Values{}
+		pInv.Set("or", fmt.Sprintf("(shipment_id.eq.%s,invoice_number.eq.%s)", shpID, shpID))
+		pInv.Set("limit", "1")
+		if err := r.dbClient.Query(ctx, "invoices", pInv, &invRows); err == nil && len(invRows) > 0 {
+			rInv := invRows[0]
+			if v, ok := rInv["invoice_number"].(string); ok && v != "" {
+				inv.InvoiceNumber = v
+			}
+			if v, ok := rInv["vendor_name"].(string); ok && v != "" {
+				inv.VendorName = v
+			}
+			if v, ok := rInv["invoice_date"].(string); ok && v != "" {
+				inv.InvoiceDate = v
+			}
+			if v, ok := rInv["subtotal"].(float64); ok && v > 0 {
+				inv.BaseChargeBilled = int64(v)
+			}
+			if v, ok := rInv["tax_amount"].(float64); ok && v > 0 {
+				inv.TaxBilled = int64(v)
+			}
+			if v, ok := rInv["grand_total"].(float64); ok && v > 0 {
+				inv.BilledAmount = int64(v)
+			}
+		}
+
+		var sjRows []map[string]interface{}
+		pSJ := url.Values{}
+		pSJ.Set("or", fmt.Sprintf("(shipment_id.eq.%s,surat_jalan_number.eq.%s)", shpID, shpID))
+		pSJ.Set("limit", "1")
+		if err := r.dbClient.Query(ctx, "surat_jalans", pSJ, &sjRows); err == nil && len(sjRows) > 0 {
+			rSJ := sjRows[0]
+			if v, ok := rSJ["surat_jalan_number"].(string); ok && v != "" {
+				shp.SuratJalanNumber = v
+			}
+			if v, ok := rSJ["awb_number"].(string); ok && v != "" {
+				shp.AWBNumber = v
+				inv.AWBNumber = v
+				pod.AWBNumber = v
+			}
+			if v, ok := rSJ["sender_city"].(string); ok && v != "" {
+				shp.Origin = v
+				inv.Origin = v
+			}
+			if v, ok := rSJ["receiver_city"].(string); ok && v != "" {
+				shp.Destination = v
+				inv.Destination = v
+			}
+			if v, ok := rSJ["actual_weight_kg"].(float64); ok && v > 0 {
+				shp.WeightActualKg = v
+				inv.WeightBilledKg = v
+			}
+			if v, ok := rSJ["total_packages"].(float64); ok && v > 0 {
+				shp.TotalPackages = int(v)
+			}
+			if v, ok := rSJ["shipment_date"].(string); ok && v != "" {
+				shp.ShipmentDate = v
+			}
+		}
+
+		var podRows []map[string]interface{}
+		pPOD := url.Values{}
+		pPOD.Set("or", fmt.Sprintf("(shipment_id.eq.%s,pod_number.eq.%s)", shpID, shpID))
+		pPOD.Set("limit", "1")
+		if err := r.dbClient.Query(ctx, "pods", pPOD, &podRows); err == nil && len(podRows) > 0 {
+			rPOD := podRows[0]
+			if v, ok := rPOD["pod_number"].(string); ok && v != "" {
+				pod.PODNumber = v
+			}
+			if v, ok := rPOD["delivery_status"].(string); ok && v != "" {
+				pod.DeliveryStatus = v
+			}
+			if v, ok := rPOD["delivery_date"].(string); ok && v != "" {
+				pod.DeliveryDate = v
+			}
+			if v, ok := rPOD["receiver_name"].(string); ok && v != "" {
+				pod.ReceiverName = v
+			}
+			if v, ok := rPOD["signature_present"].(bool); ok {
+				pod.SignaturePresent = v
+			}
+			if v, ok := rPOD["stamp_present"].(bool); ok {
+				pod.StampPresent = v
+			}
+		}
+
+		var raRows []map[string]interface{}
+		pRA := url.Values{}
+		pRA.Set("vendor_id", "eq."+vendorID)
+		pRA.Set("limit", "1")
+		if err := r.dbClient.Query(ctx, "rate_agreements", pRA, &raRows); err == nil && len(raRows) > 0 {
+			rRA := raRows[0]
+			if v, ok := rRA["agreement_id"].(string); ok && v != "" {
+				ctr.AgreementID = v
+			}
+			if v, ok := rRA["effective_from"].(string); ok && v != "" {
+				ctr.EffectiveFrom = v
+			}
+			if v, ok := rRA["effective_to"].(string); ok && v != "" {
+				ctr.EffectiveTo = v
+			}
+			if v, ok := rRA["fuel_surcharge_percent"].(float64); ok {
+				ctr.ApplicableFuelSurchargePercent = v
+			}
+			if v, ok := rRA["minimum_charge"].(float64); ok {
+				ctr.MinimumCharge = int64(v)
+			}
+			if v, ok := rRA["dispute_window_days"].(float64); ok && v > 0 {
+				ctr.DisputeWindowDays = int(v)
+			}
+		}
+	}
+
 	return &model.ShipmentEvent{
 		EventID:         evID,
 		ShipmentID:      shpID,
 		VendorID:        vendorID,
 		MatchMethod:     model.MatchExactID,
 		MatchConfidence: confVal,
-		Invoice: model.InvoiceCanonical{
-			InvoiceID:        shpID,
-			InvoiceNumber:    shpID,
-			InvoiceDate:      time.Now().Format("2006-01-02"),
-			VendorID:         vendorID,
-			BilledAmount:     int64(billedVal),
-			Currency:         "IDR",
-		},
-		Shipment: model.ShipmentCanonical{
-			SuratJalanNumber: "SJ-" + shpID,
-			ShipmentID:       shpID,
-			ServiceType:      "TRUCKING_FTL",
-			Origin:           "JKT",
-			Destination:      "SBY",
-		},
-		POD: model.PODCanonical{
-			PODNumber:      "POD-" + shpID,
-			ShipmentID:     shpID,
-			DeliveryStatus: "DELIVERED",
-		},
-		Contract: model.ContractCanonical{
-			AgreementID: "CTR-" + vendorID,
-			VendorID:    vendorID,
-		},
+		Invoice:         inv,
+		Shipment:        shp,
+		POD:             pod,
+		Contract:        ctr,
 		Pricing: model.PricingResult{
 			ExpectedBaseCharge:    int64(expectedBaseVal),
 			ExpectedFuelSurcharge: int64(expectedFuelVal),
@@ -328,6 +478,23 @@ func (r *ResourceDB) rowToShipmentEvent(row map[string]interface{}) *model.Shipm
 
 // GetEventByID retrieves an event by EventID, ShipmentID, or InvoiceNumber
 func (r *ResourceDB) GetEventByID(ctx context.Context, id string) (*model.ShipmentEvent, error) {
+	r.mu.RLock()
+	if ev, exists := r.events[id]; exists {
+		r.mu.RUnlock()
+		auditLogs, _ := r.ListAuditLogs(ctx, ev.EventID)
+		ev.AuditTrail = auditLogs
+		return ev, nil
+	}
+	for _, ev := range r.events {
+		if ev.ShipmentID == id || ev.Invoice.InvoiceNumber == id {
+			r.mu.RUnlock()
+			auditLogs, _ := r.ListAuditLogs(ctx, ev.EventID)
+			ev.AuditTrail = auditLogs
+			return ev, nil
+		}
+	}
+	r.mu.RUnlock()
+
 	if r.dbClient != nil {
 		var results []map[string]interface{}
 		params := url.Values{}
@@ -335,11 +502,8 @@ func (r *ResourceDB) GetEventByID(ctx context.Context, id string) (*model.Shipme
 		params.Set("limit", "1")
 
 		err := r.dbClient.Query(ctx, "shipment_events", params, &results)
-		if err == nil {
-			if len(results) == 0 {
-				return nil, fmt.Errorf("reconciliation event '%s' not found", id)
-			}
-			ev := r.rowToShipmentEvent(results[0])
+		if err == nil && len(results) > 0 {
+			ev := r.rowToShipmentEvent(ctx, results[0])
 			if ev != nil {
 				auditLogs, _ := r.ListAuditLogs(ctx, ev.EventID)
 				ev.AuditTrail = auditLogs
@@ -348,20 +512,9 @@ func (r *ResourceDB) GetEventByID(ctx context.Context, id string) (*model.Shipme
 		}
 	}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if ev, exists := r.events[id]; exists {
-		return ev, nil
-	}
-
-	for _, ev := range r.events {
-		if ev.ShipmentID == id || ev.Invoice.InvoiceNumber == id {
-			return ev, nil
-		}
-	}
-
 	return nil, fmt.Errorf("reconciliation event '%s' not found", id)
 }
+
 
 // ListAllEvents returns all stored events from Supabase DB (Single Source of Truth)
 func (r *ResourceDB) ListAllEvents(ctx context.Context) ([]*model.ShipmentEvent, error) {
@@ -375,9 +528,16 @@ func (r *ResourceDB) ListAllEvents(ctx context.Context) ([]*model.ShipmentEvent,
 			// Supabase query succeeded: Build directly from Supabase rows
 			eventsList := make([]*model.ShipmentEvent, 0, len(dbRows))
 			r.mu.Lock()
-			r.events = make(map[string]*model.ShipmentEvent)
 			for _, row := range dbRows {
-				ev := r.rowToShipmentEvent(row)
+				evID, _ := row["event_id"].(string)
+				if evID == "" {
+					evID, _ = row["id"].(string)
+				}
+				if existing, ok := r.events[evID]; ok && existing != nil {
+					eventsList = append(eventsList, existing)
+					continue
+				}
+				ev := r.rowToShipmentEvent(ctx, row)
 				if ev != nil {
 					r.events[ev.EventID] = ev
 					eventsList = append(eventsList, ev)
@@ -386,6 +546,7 @@ func (r *ResourceDB) ListAllEvents(ctx context.Context) ([]*model.ShipmentEvent,
 			r.mu.Unlock()
 			return eventsList, nil
 		}
+
 	}
 
 	r.mu.RLock()

@@ -642,18 +642,55 @@ func extractCanonicalEntities(
 	for k, f := range invFields {
 		invEvidence[k] = f.Source
 	}
+	if src, ok := invFields["grand_total"]; ok {
+		invEvidence["billed_amount"] = src.Source
+	}
+	if src, ok := invFields["subtotal"]; ok {
+		invEvidence["base_charge_billed"] = src.Source
+	}
+
 	sjEvidence := make(map[string]model.EvidenceSource)
 	for k, f := range sjFields {
 		sjEvidence[k] = f.Source
 	}
+	if src, ok := sjFields["actual_weight_kg"]; ok {
+		sjEvidence["weight_actual_kg"] = src.Source
+	}
+	if src, ok := sjFields["quantity"]; ok {
+		sjEvidence["total_packages"] = src.Source
+	}
+	if src, ok := sjFields["awb"]; ok {
+		sjEvidence["awb_number"] = src.Source
+	}
+	if src, ok := sjFields["surat_jalan_number"]; ok {
+		sjEvidence["shipment_id"] = src.Source
+	}
+
 	podEvidence := make(map[string]model.EvidenceSource)
 	for k, f := range podFields {
 		podEvidence[k] = f.Source
 	}
+	if src, ok := podFields["quantity"]; ok {
+		podEvidence["quantity_received"] = src.Source
+	}
+	if src, ok := podFields["awb"]; ok {
+		podEvidence["awb_number"] = src.Source
+	}
+
 	raEvidence := make(map[string]model.EvidenceSource)
 	for k, f := range raFields {
 		raEvidence[k] = f.Source
 	}
+	if src, ok := raFields["fuel_surcharge_percent"]; ok {
+		raEvidence["applicable_fuel_surcharge_percent"] = src.Source
+	}
+	if src, ok := raFields["rate_matrix"]; ok {
+		raEvidence["base_rate"] = src.Source
+	}
+	if src, ok := raFields["vendor_name"]; ok {
+		raEvidence["agreement_id"] = src.Source
+	}
+
 
 	invCanon := &model.InvoiceCanonical{
 		InvoiceID:        invNum,
