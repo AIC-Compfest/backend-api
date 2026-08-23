@@ -11,6 +11,7 @@ type Document struct {
 	Sha256Hash               string     `json:"sha256_hash"`
 	StoragePath              string     `json:"storage_path"`
 	Status                   string     `json:"status"` // PENDING, PROCESSING, COMPLETED, FAILED
+	StatusApproval           string     `json:"status_approval,omitempty"` // UNDER_REVIEW, ACCEPTED, REJECTED, DISPUTED
 	Classification           string     `json:"classification,omitempty"`
 	ClassificationConfidence float64    `json:"classification_confidence,omitempty"`
 	PageCount                int        `json:"page_count,omitempty"`

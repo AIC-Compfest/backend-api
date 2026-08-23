@@ -44,14 +44,13 @@ type Document struct {
 	MimeType    string    `json:"mime_type"`
 	SHA256Hash  string    `json:"sha256_hash"`
 	StoragePath string    `json:"storage_path"`
-	Status      string    `json:"status"`     // Processing lifecycle: QUEUED → PROCESSING → COMPLETED | FAILED
-	PageCount   int       `json:"page_count"` // Filled after PDF is split into pages
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Status         string    `json:"status"` // Processing lifecycle: QUEUED → PROCESSING → COMPLETED | FAILED
+	StatusApproval string    `json:"status_approval,omitempty"` // High-level reconciliation approval status: UNDER_REVIEW, ACCEPTED, REJECTED, DISPUTED
+	PageCount      int       `json:"page_count"` // Filled after PDF is split into pages
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 
-	// DEPRECATED fields — kept for backward-compatibility during migration.
-	// Do NOT write to these. Read from document_segments instead.
-	// Will be removed after full migration.
+	// Bundle or Single-document classification summary (Segment-level classification lives in DocumentSegment)
 	Classification           string  `json:"classification,omitempty"`
 	ClassificationConfidence float64 `json:"classification_confidence,omitempty"`
 }

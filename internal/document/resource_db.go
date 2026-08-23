@@ -133,6 +133,32 @@ func (r *ResourceDB) UpdateStatus(ctx context.Context, id string, status string,
 	return nil
 }
 
+// UpdateApprovalStatus updates the approval status of a document
+func (r *ResourceDB) UpdateApprovalStatus(ctx context.Context, id string, statusApproval string) error {
+	now := time.Now().UTC()
+	payload := map[string]interface{}{
+		"status_approval": statusApproval,
+		"updated_at":      now,
+	}
+
+	if r.dbClient != nil {
+		var updated []Document
+		params := url.Values{}
+		params.Set("id", "eq."+id)
+		_ = r.dbClient.Update(ctx, "documents", params, payload, &updated)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if doc, exists := r.memory[id]; exists {
+		doc.StatusApproval = statusApproval
+		doc.UpdatedAt = &now
+	}
+
+	return nil
+}
+
+
 // List retrieves paginated documents from Supabase DB or cache
 func (r *ResourceDB) List(ctx context.Context, page, pageSize int, statusFilter string) ([]Document, int64, error) {
 	if page < 1 {

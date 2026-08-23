@@ -591,7 +591,28 @@ func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision 
 			fmt.Printf("[Supabase Update Success] Updated shipment_events for %s to %s\n", eventID, newStatus)
 		}
 
+		// Sync status_approval to documents table in Supabase
+		docApproval := "UNDER_REVIEW"
+		switch newStatus {
+		case "APPROVED", "RESOLVED", "MATCH":
+			docApproval = "ACCEPTED"
+		case "REJECTED":
+			docApproval = "REJECTED"
+		case "DISPUTE", "DISPUTED":
+			docApproval = "DISPUTED"
+		}
+		if ev, ok := r.events[eventID]; ok && ev.Invoice.DocumentID != "" {
+			docParams := url.Values{}
+			docParams.Set("id", "eq."+ev.Invoice.DocumentID)
+			var docOut []map[string]interface{}
+			_ = r.dbClient.Update(ctx, "documents", docParams, map[string]interface{}{
+				"status_approval": docApproval,
+				"updated_at":      now,
+			}, &docOut)
+		}
+
 		auditPayload := map[string]interface{}{
+
 			"id":           model.NewUUID(),
 			"event_id":     eventID,
 			"actor_id":     decision.ActorID,

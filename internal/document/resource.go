@@ -256,6 +256,22 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		pageCount = len(aiResult.Pages)
 	}
 
+	docClass := initialClass
+	docConf := initialConf
+	if aiResult != nil && len(aiResult.Segments) > 1 {
+		docClass = "MULTI_DOC_BUNDLE"
+		var sumConf float64
+		for _, seg := range aiResult.Segments {
+			sumConf += seg.ClassificationConfidence
+		}
+		if len(aiResult.Segments) > 0 {
+			docConf = sumConf / float64(len(aiResult.Segments))
+		}
+	} else if aiResult != nil && len(aiResult.Segments) == 1 {
+		docClass = aiResult.Segments[0].DocumentType
+		docConf = aiResult.Segments[0].ClassificationConfidence
+	}
+
 	doc := &Document{
 		ID:                       model.NewUUID(),
 		Filename:                 fileHeader.Filename,
@@ -264,8 +280,9 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		Sha256Hash:               hashStr,
 		StoragePath:              storagePath,
 		Status:                   "COMPLETED",
-		Classification:           initialClass,
-		ClassificationConfidence: initialConf,
+		StatusApproval:           "UNDER_REVIEW",
+		Classification:           docClass,
+		ClassificationConfidence: docConf,
 		PageCount:                pageCount,
 		CreatedAt:                now,
 	}
@@ -273,6 +290,7 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 	if err := r.db.Create(ctx, doc); err != nil {
 		return nil, fmt.Errorf("failed to save document metadata: %w", err)
 	}
+
 
 	// Persist per-page records into document_pages table in Supabase
 	var createdPages []DocumentPage
@@ -471,8 +489,18 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		if err == nil && event != nil {
 			_ = r.eventSink.SaveEvent(ctx, event)
 			reconEventID = event.EventID
+
+			// Update approval status based on reconciliation outcome
+			if event.Reconciliation.Status == model.StatusMatch {
+				doc.StatusApproval = "ACCEPTED"
+				_ = r.db.UpdateApprovalStatus(ctx, doc.ID, "ACCEPTED")
+			} else {
+				doc.StatusApproval = "UNDER_REVIEW"
+				_ = r.db.UpdateApprovalStatus(ctx, doc.ID, "UNDER_REVIEW")
+			}
 		}
 	}
+
 
 	return &UploadResponse{
 		ID:              doc.ID,
