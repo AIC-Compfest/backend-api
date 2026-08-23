@@ -86,15 +86,16 @@ func (s *IngestionService) Ingest(ctx context.Context, filename string, r io.Rea
 	if existingDoc != nil {
 		// Idempotent return: Document already ingested
 		return &model.UploadResponse{
-			DocumentID:     existingDoc.ID,
-			Filename:       existingDoc.Filename,
-			FileSize:       existingDoc.FileSize,
-			MimeType:       existingDoc.MimeType,
-			SHA256Hash:     existingDoc.SHA256Hash,
-			Status:         existingDoc.Status,
-			IsDuplicate:    true,
-			Classification: existingDoc.Classification,
-			CreatedAt:      existingDoc.CreatedAt,
+			DocumentID:  existingDoc.ID,
+			Filename:    existingDoc.Filename,
+			FileSize:    existingDoc.FileSize,
+			MimeType:    existingDoc.MimeType,
+			SHA256Hash:  existingDoc.SHA256Hash,
+			Status:      existingDoc.Status,
+			IsDuplicate: true,
+			CreatedAt:   existingDoc.CreatedAt,
+			// SegmentsURL tells client where to poll for segment classification results
+			SegmentsURL: fmt.Sprintf("/api/v1/documents/%s/segments", existingDoc.ID),
 		}, nil
 	}
 
@@ -106,16 +107,17 @@ func (s *IngestionService) Ingest(ctx context.Context, filename string, r io.Rea
 	}
 
 	// 6. Create document database record
+	// Classification is NOT set here — it belongs to DocumentSegment, not Document.
+	// Segments will be created after AI extraction completes.
 	doc := &model.Document{
-		ID:             model.NewUUID(),
-		Filename:       filename,
-		FileSize:       written,
-		MimeType:       mimeType,
-		SHA256Hash:     hashStr,
-		StoragePath:    storagePath,
-		Status:         model.StatusQueued,
-		Classification: model.ClassUnknown,
-		CreatedAt:      time.Now().UTC(),
+		ID:          model.NewUUID(),
+		Filename:    filename,
+		FileSize:    written,
+		MimeType:    mimeType,
+		SHA256Hash:  hashStr,
+		StoragePath: storagePath,
+		Status:      model.StatusQueued,
+		CreatedAt:   time.Now().UTC(),
 	}
 
 	if err := s.repo.Create(ctx, doc); err != nil {
@@ -126,15 +128,15 @@ func (s *IngestionService) Ingest(ctx context.Context, filename string, r io.Rea
 	go s.triggerAIExtraction(doc.ID, storagePath, mimeType)
 
 	return &model.UploadResponse{
-		DocumentID:     doc.ID,
-		Filename:       doc.Filename,
-		FileSize:       doc.FileSize,
-		MimeType:       doc.MimeType,
-		SHA256Hash:     doc.SHA256Hash,
-		Status:         doc.Status,
-		IsDuplicate:    false,
-		Classification: doc.Classification,
-		CreatedAt:      doc.CreatedAt,
+		DocumentID:  doc.ID,
+		Filename:    doc.Filename,
+		FileSize:    doc.FileSize,
+		MimeType:    doc.MimeType,
+		SHA256Hash:  doc.SHA256Hash,
+		Status:      doc.Status,
+		IsDuplicate: false,
+		CreatedAt:   doc.CreatedAt,
+		SegmentsURL: fmt.Sprintf("/api/v1/documents/%s/segments", doc.ID),
 	}, nil
 }
 

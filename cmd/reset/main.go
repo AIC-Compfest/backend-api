@@ -31,13 +31,19 @@ func main() {
 		"reconciliation_cases",
 		"review_decisions",
 		"audit_events",
+		"match_evidence",
+		"rate_agreement_selections",
 		"shipment_events",
+		"field_evidence",
 		"document_extractions",
-		"documents",
+		"document_pages",
+		"document_segments",
 		"invoices",
 		"surat_jalans",
 		"pods",
+		"documents",
 	}
+
 
 	fmt.Println("\n1. Mengosongkan data transaksi, kasus, dokumen, dan audit log...")
 	for _, table := range tablesToWipe {

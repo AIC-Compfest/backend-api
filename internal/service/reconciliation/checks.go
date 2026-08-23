@@ -493,6 +493,36 @@ func (c *Checker) RunAllChecks(
 	}
 	checks = append(checks, check13)
 
+	// -----------------------------------------------------------------------
+	// 14. Unknown / Unapproved Surcharge Detection
+	// -----------------------------------------------------------------------
+	check14 := model.ReconciliationCheck{
+		CheckCode:   "CHECK_14_UNKNOWN_SURCHARGE",
+		Confidence:  1.0,
+		Description: "Verify all billed accessorial charges/surcharges are sanctioned by contract",
+	}
+	if inv.AccessorialChargesBilled > 0 && len(contract.AccessorialRules) == 0 {
+		check14.Status = "FAIL"
+		check14.Actual = fmt.Sprintf("Rp %s", formatIDR(inv.AccessorialChargesBilled))
+		check14.Expected = "Rp 0"
+		delta := inv.AccessorialChargesBilled
+		discrepancies = append(discrepancies, model.DiscrepancyItem{
+			Code:            model.CodeUnapprovedSurcharge,
+			Category:        model.CategoryPricing,
+			Description:     fmt.Sprintf("Invoice includes unsanctioned accessorial charge/surcharge of Rp %s not defined in contract", formatIDR(inv.AccessorialChargesBilled)),
+			Severity:        model.SeverityCritical,
+			BilledValue:     inv.AccessorialChargesBilled,
+			ExpectedValue:   int64(0),
+			DeltaAmount:     &delta,
+			RemediationHint: "Dispute unauthorized accessorial charges not agreed in rate agreement addendum",
+		})
+	} else {
+		check14.Status = "PASS"
+		check14.Actual = fmt.Sprintf("Rp %s", formatIDR(inv.AccessorialChargesBilled))
+		check14.Expected = "Sanctioned"
+	}
+	checks = append(checks, check14)
+
 	return checks, discrepancies
 }
 

@@ -69,8 +69,11 @@ func (pe *PricingEngine) Calculate(
 	baseRateUnit, tierDesc := contract.LookupRate(origin, dest, serviceType, weightKg)
 
 	// 2. Base Amount Calculation
-	// Indonesian 3PL base rate is per-trip or per-kg depending on tier
+	// Indonesian 3PL base rate is per-trip or per-kg depending on tier / rate unit
 	baseAmount := baseRateUnit
+	if (contract.RateUnit == "PER_KG" || (baseRateUnit > 0 && baseRateUnit <= 20000)) && weightKg > 1.0 {
+		baseAmount = int64(math.Round(float64(baseRateUnit) * weightKg))
+	}
 
 	// 3. Fuel Surcharge Calculation
 	fuelPercent := contract.FuelSurchargePct
@@ -79,9 +82,10 @@ func (pe *PricingEngine) Calculate(
 	// 4. Accessorial & Surcharges
 	var accessorialAmount int64
 	if inv != nil && inv.AccessorialChargesBilled > 0 {
-		// If specific accessorial is billed, evaluate if contract supports it
-		accessorialAmount = 0 // Evaluated separately in checks
+		accessorialAmount = inv.AccessorialChargesBilled
 	}
+
+
 
 	// 5. Pre-Tax Subtotal
 	preTaxAmount := baseAmount + fuelAmount + accessorialAmount

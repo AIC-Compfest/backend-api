@@ -170,6 +170,15 @@ func TestDatasetPilot20Benchmark(t *testing.T) {
 			}
 		}
 
+		disputeDays := gt.Contract.DisputeWindowDays
+		if disputeDays <= 0 {
+			disputeDays = 90
+		}
+		if gt.ScenarioName == "DISPUTE_WINDOW_NEAR_EXPIRY" {
+			disputeDays = 30
+			inv.InvoiceDate = time.Now().UTC().AddDate(0, 0, -28).Format("2006-01-02")
+		}
+
 		contract := &model.ContractCanonical{
 			AgreementID:                    gt.Contract.AgreementID,
 			VendorID:                       gt.VendorID,
@@ -178,7 +187,7 @@ func TestDatasetPilot20Benchmark(t *testing.T) {
 			RateUnit:                       "PER_TRIP",
 			BaseRate:                       baseRate,
 			ApplicableFuelSurchargePercent: gt.Contract.FuelSurchargePct,
-			DisputeWindowDays:              45,
+			DisputeWindowDays:              disputeDays,
 		}
 
 		// For DUPLICATE_INVOICE scenarios (TXN-000014, TXN-000020), simulate prior submission
@@ -218,6 +227,9 @@ func TestDatasetPilot20Benchmark(t *testing.T) {
 			falseNegatives++
 		}
 
+		if !statusMatch {
+			t.Logf("[%s] FAILED MATCH - Discrepancies: %+v", gt.TransactionID, event.Reconciliation.Discrepancies)
+		}
 		t.Logf("[%s] Scenario: %-20s | GT Status: %-10s | Pred Status: %-10s | Correct: %t | Latency: %v",
 			gt.TransactionID, gt.ScenarioName, gtStatus, predStatus, statusMatch, elapsed)
 	}

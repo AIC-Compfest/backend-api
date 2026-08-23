@@ -14,14 +14,20 @@ func TestEntityResolution_AdversarialSuite(t *testing.T) {
 	// 1 & 2. EXACT MATCH NORMALIZATION & OCR STRING CORRUPTIONS
 	// -------------------------------------------------------------------------
 	t.Run("ADV_ER_01_Exact_ID_Punctuation_And_Case_Normalization", func(t *testing.T) {
+		// Invoice carries a reference to shipment "shp-2026-000123" (with lowercase, spaces, hyphens).
+		// Surat Jalan has the same shipment as "SHP-2026-000123" (uppercase, proper format).
+		// After NormalizeID both should produce "20260001 23" → "2026000123"
+		// Entity resolver MUST use inv.ShipmentID (PRIMARY key) for Level 1 matching.
 		inv := &model.InvoiceCanonical{
 			InvoiceNumber: "INV-001",
-			InvoiceID:     "  shp-2026-000123  ",
-			Origin:        "JAKARTA",
-			Destination:   "SURABAYA",
+			InvoiceID:     "INV-2026-001",
+			// ShipmentID is the PRIMARY entity resolution key (ARCHITECTURE_AUDIT fix)
+			ShipmentID:  "  shp-2026-000123  ", // normalized → "2026000123"
+			Origin:      "JAKARTA",
+			Destination: "SURABAYA",
 		}
 		sj := &model.ShipmentCanonical{
-			ShipmentID:  "SHP-2026-000123",
+			ShipmentID:  "SHP-2026-000123", // normalized → "2026000123"
 			AWBNumber:   "AWB-10000001",
 			Origin:      "JAKARTA",
 			Destination: "SURABAYA",
@@ -29,12 +35,16 @@ func TestEntityResolution_AdversarialSuite(t *testing.T) {
 
 		res := resolver.Resolve(inv, sj, nil)
 		if !res.IsMatched {
-			t.Errorf("normalized exact ID should match")
+			t.Errorf("normalized exact ShipmentID should match: inv.ShipmentID=%q sj.ShipmentID=%q", inv.ShipmentID, sj.ShipmentID)
 		}
 		if res.MatchConfidence < 0.95 {
 			t.Errorf("exact ID match confidence must be >= 0.95, got %f", res.MatchConfidence)
 		}
+		if res.MatchMethod != model.MatchExactID {
+			t.Errorf("exact ID match must use MatchExactID method, got %q", res.MatchMethod)
+		}
 	})
+
 
 	t.Run("ADV_ER_02_OCR_One_Digit_Substitution_Or_Transposition", func(t *testing.T) {
 		// OCR misread '0' as 'O' or swapped digits

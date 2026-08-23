@@ -33,6 +33,36 @@ func NewResourceDB(dbClient *database.Client) *ResourceDB {
 	}
 }
 
+// GetVendorName queries the rate_agreements table in Supabase for the official 3PL vendor name
+func (r *ResourceDB) GetVendorName(ctx context.Context, vendorID string) string {
+	if vendorID == "" {
+		return "Vendor 3PL"
+	}
+	if r.dbClient != nil {
+		var agreements []map[string]interface{}
+		params := url.Values{}
+		params.Set("vendor_id", "eq."+vendorID)
+		params.Set("limit", "1")
+		if err := r.dbClient.Query(ctx, "rate_agreements", params, &agreements); err == nil && len(agreements) > 0 {
+			if name, ok := agreements[0]["vendor_name"].(string); ok && name != "" {
+				return name
+			}
+		}
+	}
+
+	vendorMap := map[string]string{
+		"3PL-LOG-001": "PT Cepat Logistik Nusantara",
+		"3PL-LOG-002": "PT Trans Express Indonesia",
+		"3PL-LOG-003": "PT Kargo Andalan Utama",
+		"3PL-LOG-004": "PT Sinar Logistik Mandiri",
+		"3PL-LOG-005": "PT Aruna Freight Solusi",
+	}
+	if name, ok := vendorMap[vendorID]; ok {
+		return name
+	}
+	return vendorID
+}
+
 // SeedFromPilotDataset boots up pilot benchmark dataset into memory cache
 func (r *ResourceDB) SeedFromPilotDataset(datasetDir string) error {
 	txnsDir := filepath.Join(datasetDir, "transactions")

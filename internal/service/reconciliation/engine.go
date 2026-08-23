@@ -39,6 +39,8 @@ func NewEngine() *Engine {
 }
 
 // ReconcileTransaction performs end-to-end 4-way deterministic reconciliation for a single transaction.
+// It enforces strict entity resolution before proceeding to pricing and checks.
+// No match is forced — if evidence is insufficient, returns INSUFFICIENT_EVIDENCE.
 func (e *Engine) ReconcileTransaction(
 	inv *model.InvoiceCanonical,
 	sj *model.ShipmentCanonical,
@@ -71,20 +73,36 @@ func (e *Engine) ReconcileTransaction(
 		vendorID = inv.VendorID
 	}
 
+	// Pre-declare discrepancies so conflict check can append before RunAllChecks
+	var discrepancies []model.DiscrepancyItem
+
 	// 1. Compile Contract
 	compiledContract, err := e.compiler.Compile(contract)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compile contract: %w", err)
 	}
 
-	// 2. Entity Resolution (PRD §25–§27)
+	// 2. Entity Resolution (PRD §15-§19)
 	resolution := e.resolver.Resolve(inv, sj, pod)
+
+	// If there's a hard CONFLICT, escalate immediately
+	// Do NOT proceed to pricing with conflicting entity resolution
+	if resolution.MatchDecision == MatchDecisionConflict {
+		discrepancies = append(discrepancies, model.DiscrepancyItem{
+			Code:            model.CodeShipmentNotFound,
+			Category:        model.CategoryShipment,
+			Description:     fmt.Sprintf("ENTITY CONFLICT: %s", resolution.ConflictReason),
+			Severity:        model.SeverityCritical,
+			RemediationHint: "Identity keys on invoice and surat jalan conflict. Verify the correct shipment reference before payment.",
+		})
+	}
 
 	// 3. Pricing Calculation (PRD §29)
 	pricingResult := e.pricing.Calculate(compiledContract, sj, inv)
 
-	// 4. Run All 13 Independent Checks (PRD §30–§31)
-	checks, discrepancies := e.checker.RunAllChecks(inv, sj, pod, compiledContract, pricingResult, resolution)
+	// 4. Run All 13 Independent Checks (PRD §30–§31) — appends to existing discrepancies
+	checks, extraDiscrepancies := e.checker.RunAllChecks(inv, sj, pod, compiledContract, pricingResult, resolution)
+	discrepancies = append(discrepancies, extraDiscrepancies...)
 
 	// 5. Business Duplicate Detection (PRD §32)
 	businessKey := fmt.Sprintf("%s:%s:%s", vendorID, NormalizeID(inv.InvoiceNumber), NormalizeID(shipmentID))

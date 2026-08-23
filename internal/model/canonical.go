@@ -67,25 +67,38 @@ func (r *ExtractionResponse) FieldMap() map[string]ExtractedField {
 
 // InvoiceCanonical represents extracted & normalized facts from 3PL Invoice.
 type InvoiceCanonical struct {
-	InvoiceID                 string    `json:"invoice_id"`
-	InvoiceNumber             string    `json:"invoice_number"`
-	LineNumber                int       `json:"line_number,omitempty"`
-	InvoiceDate               string    `json:"invoice_date"` // YYYY-MM-DD
-	VendorID                  string    `json:"vendor_id"`
-	VendorName                string    `json:"vendor_name,omitempty"`
-	CustomerName              string    `json:"customer_name,omitempty"`
-	ServiceType               string    `json:"service_type,omitempty"`
-	Origin                    string    `json:"origin,omitempty"`
-	Destination               string    `json:"destination,omitempty"`
-	WeightBilledKg            float64   `json:"weight_billed_kg"`
-	BaseChargeBilled          int64     `json:"base_charge_billed"`
-	FuelSurchargeBilled       int64     `json:"fuel_surcharge_billed"`
-	FuelSurchargePercentBilled float64  `json:"fuel_surcharge_percent_billed"`
-	AccessorialChargesBilled  int64     `json:"accessorial_charges_billed"`
-	TaxBilled                 int64     `json:"tax_billed"`
-	BilledAmount              int64     `json:"billed_amount"`
-	Currency                  string    `json:"currency"`
-	FieldEvidence             map[string]EvidenceSource `json:"field_evidence,omitempty"`
+	InvoiceID    string `json:"invoice_id"`
+	InvoiceNumber string `json:"invoice_number"`
+	LineNumber   int    `json:"line_number,omitempty"`
+	InvoiceDate  string `json:"invoice_date"` // YYYY-MM-DD
+
+	// PRIMARY entity resolution keys (Level 1 matching — use these FIRST).
+	// Entity resolver MUST check these before falling back to InvoiceNumber.
+	// ShipmentID is the shipment reference number on the invoice line item.
+	ShipmentID string `json:"shipment_id,omitempty"`
+	AWBNumber  string `json:"awb_number,omitempty"`
+
+	VendorID    string `json:"vendor_id"`
+	VendorName  string `json:"vendor_name,omitempty"`
+	CustomerName string `json:"customer_name,omitempty"`
+	ServiceType  string `json:"service_type,omitempty"`
+	Origin       string `json:"origin,omitempty"`
+	Destination  string `json:"destination,omitempty"`
+
+	WeightBilledKg             float64 `json:"weight_billed_kg"`
+	BaseChargeBilled           int64   `json:"base_charge_billed"`
+	FuelSurchargeBilled        int64   `json:"fuel_surcharge_billed"`
+	FuelSurchargePercentBilled float64 `json:"fuel_surcharge_percent_billed"`
+	AccessorialChargesBilled   int64   `json:"accessorial_charges_billed"`
+	TaxBilled                  int64   `json:"tax_billed"`
+	BilledAmount               int64   `json:"billed_amount"`
+	Currency                   string  `json:"currency"`
+
+	// Provenance — which document segment produced this invoice record
+	DocumentID string `json:"document_id,omitempty"`
+	SegmentID  string `json:"segment_id,omitempty"`
+
+	FieldEvidence map[string]EvidenceSource `json:"field_evidence,omitempty"`
 }
 
 // ShipmentCanonical represents extracted & normalized facts from Surat Jalan.
@@ -100,39 +113,54 @@ type ShipmentCanonical struct {
 	WeightActualKg   float64 `json:"weight_actual_kg"`
 	TotalPackages    int     `json:"total_packages"`
 	ItemDescription  string  `json:"item_description,omitempty"`
-	FieldEvidence    map[string]EvidenceSource `json:"field_evidence,omitempty"`
+
+	// Provenance
+	DocumentID string `json:"document_id,omitempty"`
+	SegmentID  string `json:"segment_id,omitempty"`
+
+	FieldEvidence map[string]EvidenceSource `json:"field_evidence,omitempty"`
 }
 
 // PODCanonical represents extracted & normalized facts from Proof of Delivery.
 type PODCanonical struct {
-	PODNumber           string   `json:"pod_number"`
-	ShipmentID          string   `json:"shipment_id,omitempty"`
-	AWBNumber           string   `json:"awb_number,omitempty"`
-	DeliveryStatus      string   `json:"delivery_status"` // DELIVERED, PARTIALLY_DELIVERED, FAILED, RETURNED, MISSING
-	DeliveryDate        string   `json:"delivery_date,omitempty"` // YYYY-MM-DD
-	ReceiverName        string   `json:"receiver_name,omitempty"`
-	QuantityReceived    *int     `json:"quantity_received,omitempty"`
-	SignaturePresent    bool     `json:"signature_present"`
-	SignatureConfidence float64  `json:"signature_confidence"`
-	StampPresent        bool     `json:"stamp_present"`
-	Condition           string   `json:"condition,omitempty"`
-	FieldEvidence       map[string]EvidenceSource `json:"field_evidence,omitempty"`
+	PODNumber           string  `json:"pod_number"`
+	ShipmentID          string  `json:"shipment_id,omitempty"`
+	AWBNumber           string  `json:"awb_number,omitempty"`
+	DeliveryStatus      string  `json:"delivery_status"` // DELIVERED, PARTIALLY_DELIVERED, FAILED, RETURNED, MISSING
+	DeliveryDate        string  `json:"delivery_date,omitempty"` // YYYY-MM-DD
+	ReceiverName        string  `json:"receiver_name,omitempty"`
+	QuantityReceived    *int    `json:"quantity_received,omitempty"`
+	SignaturePresent    bool    `json:"signature_present"`
+	SignatureConfidence float64 `json:"signature_confidence"`
+	StampPresent        bool    `json:"stamp_present"`
+	Condition           string  `json:"condition,omitempty"`
+
+	// Provenance
+	DocumentID string `json:"document_id,omitempty"`
+	SegmentID  string `json:"segment_id,omitempty"`
+
+	FieldEvidence map[string]EvidenceSource `json:"field_evidence,omitempty"`
 }
 
 // ContractCanonical represents extracted & normalized rate agreement.
 type ContractCanonical struct {
-	AgreementID                     string             `json:"agreement_id"`
-	VendorID                        string             `json:"vendor_id"`
-	EffectiveFrom                   string             `json:"effective_from"` // YYYY-MM-DD
-	EffectiveTo                     string             `json:"effective_to"`   // YYYY-MM-DD
-	RateUnit                        string             `json:"rate_unit"`      // PER_KG, FLAT
-	BaseRate                        int64              `json:"base_rate"`
-	ApplicableFuelSurchargePercent  float64            `json:"applicable_fuel_surcharge_percent"`
-	MinimumCharge                   int64              `json:"minimum_charge,omitempty"`
-	DisputeWindowDays               int                `json:"dispute_window_days"`
-	RateMatrix                      []RateMatrixEntry  `json:"rate_matrix,omitempty"`
-	Surcharges                      map[string]float64 `json:"surcharges,omitempty"`
-	FieldEvidence                   map[string]EvidenceSource `json:"field_evidence,omitempty"`
+	AgreementID                    string             `json:"agreement_id"`
+	VendorID                       string             `json:"vendor_id"`
+	EffectiveFrom                  string             `json:"effective_from"` // YYYY-MM-DD
+	EffectiveTo                    string             `json:"effective_to"`   // YYYY-MM-DD
+	RateUnit                       string             `json:"rate_unit"`      // PER_KG, FLAT
+	BaseRate                       int64              `json:"base_rate"`
+	ApplicableFuelSurchargePercent float64            `json:"applicable_fuel_surcharge_percent"`
+	MinimumCharge                  int64              `json:"minimum_charge,omitempty"`
+	DisputeWindowDays              int                `json:"dispute_window_days"`
+	RateMatrix                     []RateMatrixEntry  `json:"rate_matrix,omitempty"`
+	Surcharges                     map[string]float64 `json:"surcharges,omitempty"`
+
+	// Provenance
+	DocumentID string `json:"document_id,omitempty"`
+	SegmentID  string `json:"segment_id,omitempty"`
+
+	FieldEvidence map[string]EvidenceSource `json:"field_evidence,omitempty"`
 }
 
 // RateMatrixEntry defines specific lane pricing in the contract rate card.

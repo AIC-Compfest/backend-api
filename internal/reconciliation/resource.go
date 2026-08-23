@@ -1,7 +1,9 @@
 package reconciliation
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,12 +11,14 @@ import (
 
 	"backend-api/internal/model"
 	serviceRecon "backend-api/internal/service/reconciliation"
+	"backend-api/internal/storage"
 )
 
 // Resource orchestrates reconciliation logic, queue prioritization, and dispute management
 type Resource struct {
-	db     *ResourceDB
-	engine *serviceRecon.Engine
+	db      *ResourceDB
+	engine  *serviceRecon.Engine
+	storage storage.Storage
 }
 
 // NewResource creates a reconciliation Resource instance
@@ -26,6 +30,11 @@ func NewResource(db *ResourceDB, engine *serviceRecon.Engine) *Resource {
 		db:     db,
 		engine: engine,
 	}
+}
+
+// SetStorage sets the storage provider for persisting dispute packages
+func (r *Resource) SetStorage(store storage.Storage) {
+	r.storage = store
 }
 
 // Reconcile executes 4-way matching and persists the result
@@ -111,18 +120,7 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 			createdAtStr = time.Now().Format("2006-01-02")
 		}
 
-		vendorName := ev.VendorID
-		if strings.Contains(ev.VendorID, "001") {
-			vendorName = "PT Cepat Logistik Nusantara"
-		} else if strings.Contains(ev.VendorID, "002") {
-			vendorName = "PT Trans Express Indonesia"
-		} else if strings.Contains(ev.VendorID, "003") {
-			vendorName = "PT Kargo Andalan Utama"
-		} else if strings.Contains(ev.VendorID, "004") {
-			vendorName = "PT Sinar Logistik Mandiri"
-		} else if strings.Contains(ev.VendorID, "005") {
-			vendorName = "PT Aruna Freight Solusi"
-		}
+		vendorName := r.db.GetVendorName(ctx, ev.VendorID)
 
 		items = append(items, QueueItemDTO{
 			EventID:        ev.EventID,
@@ -272,17 +270,9 @@ func (r *Resource) GetDisputePackage(ctx context.Context, eventID string, review
 	}
 
 	memo := r.formatDisputeMemo(ev, reviewerID)
+	vendorName := r.db.GetVendorName(ctx, ev.VendorID)
 
-	vendorName := ev.VendorID
-	if strings.Contains(ev.VendorID, "001") {
-		vendorName = "PT Cepat Logistik Nusantara"
-	} else if strings.Contains(ev.VendorID, "002") {
-		vendorName = "PT Trans Express Indonesia"
-	} else if strings.Contains(ev.VendorID, "003") {
-		vendorName = "PT Kargo Andalan Utama"
-	}
-
-	return &DisputePackageDTO{
+	pkg := &DisputePackageDTO{
 		EventID:          ev.EventID,
 		TransactionID:    ev.EventID,
 		VendorName:       vendorName,
@@ -296,7 +286,19 @@ func (r *Resource) GetDisputePackage(ctx context.Context, eventID string, review
 		GeneratedBy:      reviewerID,
 		DiscrepancyItems: ev.Reconciliation.Discrepancies,
 		FormattedMemo:    memo,
-	}, nil
+	}
+
+	// Persist dispute package artifacts to Supabase Storage (dispute-package bucket)
+	if r.storage != nil {
+		memoPath := fmt.Sprintf("%s/memo.txt", ev.EventID)
+		jsonPath := fmt.Sprintf("%s/dispute.json", ev.EventID)
+		_, _ = r.storage.Save(ctx, "dispute-package", memoPath, strings.NewReader(memo))
+		if pkgBytes, err := json.MarshalIndent(pkg, "", "  "); err == nil {
+			_, _ = r.storage.Save(ctx, "dispute-package", jsonPath, bytes.NewReader(pkgBytes))
+		}
+	}
+
+	return pkg, nil
 }
 
 func (r *Resource) formatDisputeMemo(ev *model.ShipmentEvent, reviewer string) string {

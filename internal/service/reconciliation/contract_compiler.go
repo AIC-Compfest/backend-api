@@ -14,6 +14,7 @@ type CompiledContract struct {
 	VendorID            string
 	EffectiveFrom       time.Time
 	EffectiveTo         time.Time
+	RateUnit            string
 	DefaultBaseRate     int64
 	FuelSurchargePct    float64
 	MinimumCharge       int64
@@ -22,6 +23,7 @@ type CompiledContract struct {
 	WeightTierRates     []CompiledTierRate
 	AccessorialRules    map[string]float64
 }
+
 
 // CompiledTierRate specifies lane rate for weight bracket.
 type CompiledTierRate struct {
@@ -94,6 +96,7 @@ func (c *ContractCompiler) Compile(contract *model.ContractCanonical) (*Compiled
 		VendorID:          contract.VendorID,
 		EffectiveFrom:     from,
 		EffectiveTo:       to,
+		RateUnit:          contract.RateUnit,
 		DefaultBaseRate:   contract.BaseRate,
 		FuelSurchargePct:  fuelPct,
 		MinimumCharge:     contract.MinimumCharge,
@@ -102,6 +105,7 @@ func (c *ContractCompiler) Compile(contract *model.ContractCanonical) (*Compiled
 		WeightTierRates:   tierRates,
 		AccessorialRules:  contract.Surcharges,
 	}, nil
+
 }
 
 // LookupRate finds the applicable base rate for a specific shipment lane and weight.

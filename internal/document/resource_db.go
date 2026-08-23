@@ -11,13 +11,15 @@ import (
 	"backend-api/internal/model"
 )
 
-// ResourceDB handles database operations for documents
+// ResourceDB handles database operations for documents and pages
 type ResourceDB struct {
 	dbClient *database.Client
 	mu       sync.RWMutex
 	memory   map[string]*Document
 	byHash   map[string]string
 	order    []string
+	pages    map[string][]DocumentPage    // Key: docID -> pages
+	segments map[string][]DocumentSegment // Key: docID -> segments
 }
 
 // NewResourceDB creates a new document ResourceDB instance
@@ -27,6 +29,8 @@ func NewResourceDB(dbClient *database.Client) *ResourceDB {
 		memory:   make(map[string]*Document),
 		byHash:   make(map[string]string),
 		order:    make([]string, 0),
+		pages:    make(map[string][]DocumentPage),
+		segments: make(map[string][]DocumentSegment),
 	}
 }
 
@@ -190,6 +194,102 @@ func (r *ResourceDB) List(ctx context.Context, page, pageSize int, statusFilter 
 	return filtered[offset:end], total, nil
 }
 
+// InsertPage persists an individual page record into document_pages table in Supabase
+func (r *ResourceDB) InsertPage(ctx context.Context, p *DocumentPage) error {
+	if p.ID == "" {
+		p.ID = model.NewUUID()
+	}
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now().UTC()
+	}
+
+	if r.dbClient != nil {
+		var created []DocumentPage
+		_ = r.dbClient.Insert(ctx, "document_pages", p, &created)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pages[p.DocumentID] = append(r.pages[p.DocumentID], *p)
+	return nil
+}
+
+// ListPages returns all pages associated with a document
+func (r *ResourceDB) ListPages(ctx context.Context, docID string) ([]DocumentPage, error) {
+	if r.dbClient != nil {
+		var pages []DocumentPage
+		params := url.Values{}
+		params.Set("document_id", "eq."+docID)
+		params.Set("order", "page_number.asc")
+		if err := r.dbClient.Query(ctx, "document_pages", params, &pages); err == nil && len(pages) > 0 {
+			return pages, nil
+		}
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if pages, exists := r.pages[docID]; exists {
+		return pages, nil
+	}
+	return []DocumentPage{}, nil
+}
+
+// GetPage retrieves a specific page by document ID and page number
+func (r *ResourceDB) GetPage(ctx context.Context, docID string, pageNumber int) (*DocumentPage, error) {
+	if r.dbClient != nil {
+		var pages []DocumentPage
+		params := url.Values{}
+		params.Set("document_id", "eq."+docID)
+		params.Set("page_number", fmt.Sprintf("eq.%d", pageNumber))
+		params.Set("limit", "1")
+		if err := r.dbClient.Query(ctx, "document_pages", params, &pages); err == nil && len(pages) > 0 {
+			return &pages[0], nil
+		}
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if pages, exists := r.pages[docID]; exists {
+		for _, p := range pages {
+			if p.PageNumber == pageNumber {
+				return &p, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("page %d of document '%s' not found", pageNumber, docID)
+}
+
+// UpdatePageStatus updates the processing status and error message of a document page
+func (r *ResourceDB) UpdatePageStatus(ctx context.Context, docID string, pageNumber int, status string, errMsg string) error {
+	now := time.Now().UTC()
+	if r.dbClient != nil {
+		params := url.Values{}
+		params.Set("document_id", "eq."+docID)
+		params.Set("page_number", fmt.Sprintf("eq.%d", pageNumber))
+		payload := map[string]interface{}{
+			"status":        status,
+			"error_message": errMsg,
+			"updated_at":    now,
+		}
+		var updated []DocumentPage
+		_ = r.dbClient.Update(ctx, "document_pages", params, payload, &updated)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if pages, exists := r.pages[docID]; exists {
+		for i := range pages {
+			if pages[i].PageNumber == pageNumber {
+				pages[i].Status = status
+				pages[i].ErrorMessage = errMsg
+				pages[i].UpdatedAt = &now
+				break
+			}
+		}
+	}
+	return nil
+}
+
 // InsertExtraction saves extracted bounding boxes and OCR fields into document_extractions table
 func (r *ResourceDB) InsertExtraction(ctx context.Context, docID string, extractedJSON map[string]interface{}, confidence float64) error {
 	if r.dbClient != nil {
@@ -233,4 +333,71 @@ func (r *ResourceDB) InsertPOD(ctx context.Context, payload map[string]interface
 		_ = r.dbClient.Insert(ctx, "pods", payload, &out)
 	}
 	return nil
+}
+
+// InsertSegment saves a document segment record into Supabase DB and local cache
+func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) error {
+	if seg.ID == "" {
+		seg.ID = model.NewUUID()
+	}
+	if seg.CreatedAt.IsZero() {
+		seg.CreatedAt = time.Now().UTC()
+	}
+	if seg.PageCount == 0 && seg.EndPage >= seg.StartPage {
+		seg.PageCount = seg.EndPage - seg.StartPage + 1
+	}
+
+	if r.dbClient != nil {
+		// Note: page_count is a GENERATED ALWAYS column in PostgreSQL, so we omit it from the INSERT payload
+		payload := map[string]interface{}{
+			"id":                        seg.ID,
+			"document_id":               seg.DocumentID,
+			"segment_number":            seg.SegmentNumber,
+			"document_type":             seg.DocumentType,
+			"start_page":                seg.StartPage,
+			"end_page":                  seg.EndPage,
+			"classification_confidence": seg.ClassificationConfidence,
+			"classification_method":     seg.ClassificationMethod,
+			"extraction_status":         seg.ExtractionStatus,
+			"created_at":                seg.CreatedAt,
+			"updated_at":                seg.CreatedAt,
+		}
+		if seg.DomainEntityType != "" {
+			payload["domain_entity_type"] = seg.DomainEntityType
+		}
+		if seg.DomainEntityID != "" {
+			payload["domain_entity_id"] = seg.DomainEntityID
+		}
+		if seg.ErrorMessage != "" {
+			payload["error_message"] = seg.ErrorMessage
+		}
+		var created []DocumentSegment
+		_ = r.dbClient.Insert(ctx, "document_segments", payload, &created)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.segments[seg.DocumentID] = append(r.segments[seg.DocumentID], *seg)
+	return nil
+}
+
+
+// ListSegments returns all segments associated with a document ordered by segment_number
+func (r *ResourceDB) ListSegments(ctx context.Context, docID string) ([]DocumentSegment, error) {
+	if r.dbClient != nil {
+		var segs []DocumentSegment
+		params := url.Values{}
+		params.Set("document_id", "eq."+docID)
+		params.Set("order", "segment_number.asc")
+		if err := r.dbClient.Query(ctx, "document_segments", params, &segs); err == nil && len(segs) > 0 {
+			return segs, nil
+		}
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if segs, exists := r.segments[docID]; exists {
+		return segs, nil
+	}
+	return []DocumentSegment{}, nil
 }

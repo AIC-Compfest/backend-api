@@ -73,3 +73,85 @@ func Download(res *document.Resource) gin.HandlerFunc {
 		_, _ = io.Copy(c.Writer, reader)
 	}
 }
+
+// PipelineStatus handles GET /api/v1/documents/:id/pipeline-status
+func PipelineStatus(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		status, err := res.GetPipelineStatus(c.Request.Context(), id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, status)
+	}
+}
+
+// ListPages handles GET /api/v1/documents/:id/pages
+func ListPages(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		pages, err := res.ListPages(c.Request.Context(), id)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"document_id": id, "count": len(pages), "pages": pages})
+	}
+}
+
+// GetPage handles GET /api/v1/documents/:id/pages/:page_number
+func GetPage(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		pageNumber, err := strconv.Atoi(c.Param("page_number"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid page_number parameter"})
+			return
+		}
+
+		page, err := res.GetPage(c.Request.Context(), id, pageNumber)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, page)
+	}
+}
+
+// RetryPage handles POST /api/v1/documents/:id/pages/:page_number/retry
+func RetryPage(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		pageNumber, err := strconv.Atoi(c.Param("page_number"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid page_number parameter"})
+			return
+		}
+
+		page, err := res.RetryPage(c.Request.Context(), id, pageNumber)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Page extraction retry scheduled", "page": page})
+	}
+}
+
+// ListSegments handles GET /api/v1/documents/:id/segments
+func ListSegments(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		segments, err := res.ListSegments(c.Request.Context(), id)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"document_id": id,
+			"count":       len(segments),
+			"segments":    segments,
+		})
+	}
+}
+

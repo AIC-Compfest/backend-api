@@ -89,6 +89,7 @@ func New(cfg config.Config) *Application {
 		_ = reconDB.SeedFromPilotDataset("d:/AIC/synthetic-data/dataset/v4_pilot_20")
 	}
 	reconRes := reconciliation.NewResource(reconDB, nil)
+	reconRes.SetStorage(store)
 
 	// Document Resource
 	docDB := document.NewResourceDB(dbClient)
