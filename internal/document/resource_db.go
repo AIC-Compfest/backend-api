@@ -308,6 +308,7 @@ func (r *ResourceDB) InsertPage(ctx context.Context, p *DocumentPage) error {
 		err := r.dbClient.Insert(ctx, "document_pages", payload, &created)
 		if err != nil {
 			fmt.Printf("[ResourceDB.InsertPage] Error inserting page %d: %v\n", p.PageNumber, err)
+			return err
 		}
 	}
 
@@ -457,6 +458,7 @@ func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) er
 	}
 
 	if r.dbClient != nil {
+		// Note: page_count is a GENERATED column in PostgreSQL, so omit it from insert payload
 		payload := map[string]interface{}{
 			"id":                        seg.ID,
 			"document_id":               seg.DocumentID,
@@ -464,7 +466,6 @@ func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) er
 			"document_type":             seg.DocumentType,
 			"start_page":                seg.StartPage,
 			"end_page":                  seg.EndPage,
-			"page_count":                seg.PageCount,
 			"classification_confidence": seg.ClassificationConfidence,
 			"classification_method":     seg.ClassificationMethod,
 			"extraction_status":         seg.ExtractionStatus,
@@ -484,6 +485,7 @@ func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) er
 		err := r.dbClient.Insert(ctx, "document_segments", payload, &created)
 		if err != nil {
 			fmt.Printf("[ResourceDB.InsertSegment] Error inserting segment %d: %v\n", seg.SegmentNumber, err)
+			return err
 		}
 	}
 
