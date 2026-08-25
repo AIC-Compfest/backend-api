@@ -88,10 +88,38 @@ func (r *ResourceDB) FindByID(ctx context.Context, id string) (*Document, error)
 
 // Create inserts a new document record into Supabase DB and local cache
 func (r *ResourceDB) Create(ctx context.Context, doc *Document) error {
+	if doc.ID == "" {
+		doc.ID = model.NewUUID()
+	}
+	if doc.CreatedAt.IsZero() {
+		doc.CreatedAt = time.Now().UTC()
+	}
+	now := time.Now().UTC()
+	doc.UpdatedAt = &now
+
 	if r.dbClient != nil {
+		payload := map[string]interface{}{
+			"id":                        doc.ID,
+			"filename":                  doc.Filename,
+			"file_size":                 doc.FileSize,
+			"mime_type":                 doc.MimeType,
+			"sha256_hash":               doc.Sha256Hash,
+			"storage_path":              doc.StoragePath,
+			"status":                    doc.Status,
+			"status_approval":           doc.StatusApproval,
+			"classification":            doc.Classification,
+			"classification_confidence": doc.ClassificationConfidence,
+			"page_count":                doc.PageCount,
+			"created_at":                doc.CreatedAt,
+			"updated_at":                doc.UpdatedAt,
+		}
 		var created []Document
-		err := r.dbClient.Insert(ctx, "documents", doc, &created)
-		if err == nil && len(created) > 0 {
+		err := r.dbClient.Insert(ctx, "documents", payload, &created)
+		if err != nil {
+			fmt.Printf("[ResourceDB.Create] Error inserting document: %v\n", err)
+			return err
+		}
+		if len(created) > 0 {
 			*doc = created[0]
 		}
 	}
@@ -228,10 +256,59 @@ func (r *ResourceDB) InsertPage(ctx context.Context, p *DocumentPage) error {
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now().UTC()
 	}
+	if p.Width <= 0 {
+		p.Width = 595
+	}
+	if p.Height <= 0 {
+		p.Height = 842
+	}
+	if p.PageWidthPts <= 0 {
+		p.PageWidthPts = float64(p.Width)
+	}
+	if p.PageHeightPts <= 0 {
+		p.PageHeightPts = float64(p.Height)
+	}
 
 	if r.dbClient != nil {
+		payload := map[string]interface{}{
+			"id":               p.ID,
+			"document_id":      p.DocumentID,
+			"page_number":      p.PageNumber,
+			"width":            p.Width,
+			"height":           p.Height,
+			"ocr_confidence":   p.OCRConfidence,
+			"created_at":       p.CreatedAt,
+		}
+		if p.OCRText != "" {
+			payload["ocr_text"] = p.OCRText
+		}
+		if p.OCREngineUsed != "" {
+			payload["ocr_engine_used"] = p.OCREngineUsed
+		}
+		if p.PageWidthPts > 0 {
+			payload["page_width_pts"] = p.PageWidthPts
+		}
+		if p.PageHeightPts > 0 {
+			payload["page_height_pts"] = p.PageHeightPts
+		}
+		if p.OCRCompletedAt != nil {
+			payload["ocr_completed_at"] = p.OCRCompletedAt
+		}
+		if p.SegmentID != "" {
+			payload["segment_id"] = p.SegmentID
+		}
+		if p.LayoutJSON != nil {
+			payload["layout_json"] = p.LayoutJSON
+		}
+		if p.OCRResult != nil {
+			payload["ocr_result"] = p.OCRResult
+		}
+
 		var created []DocumentPage
-		_ = r.dbClient.Insert(ctx, "document_pages", p, &created)
+		err := r.dbClient.Insert(ctx, "document_pages", payload, &created)
+		if err != nil {
+			fmt.Printf("[ResourceDB.InsertPage] Error inserting page %d: %v\n", p.PageNumber, err)
+		}
 	}
 
 	r.mu.Lock()
@@ -285,7 +362,7 @@ func (r *ResourceDB) GetPage(ctx context.Context, docID string, pageNumber int) 
 	return nil, fmt.Errorf("page %d of document '%s' not found", pageNumber, docID)
 }
 
-// UpdatePageStatus updates the processing status and error message of a document page
+// UpdatePageStatus updates the in-memory processing status and OCR completion of a document page
 func (r *ResourceDB) UpdatePageStatus(ctx context.Context, docID string, pageNumber int, status string, errMsg string) error {
 	now := time.Now().UTC()
 	if r.dbClient != nil {
@@ -293,9 +370,7 @@ func (r *ResourceDB) UpdatePageStatus(ctx context.Context, docID string, pageNum
 		params.Set("document_id", "eq."+docID)
 		params.Set("page_number", fmt.Sprintf("eq.%d", pageNumber))
 		payload := map[string]interface{}{
-			"status":        status,
-			"error_message": errMsg,
-			"updated_at":    now,
+			"ocr_completed_at": now,
 		}
 		var updated []DocumentPage
 		_ = r.dbClient.Update(ctx, "document_pages", params, payload, &updated)
@@ -306,9 +381,7 @@ func (r *ResourceDB) UpdatePageStatus(ctx context.Context, docID string, pageNum
 	if pages, exists := r.pages[docID]; exists {
 		for i := range pages {
 			if pages[i].PageNumber == pageNumber {
-				pages[i].Status = status
-				pages[i].ErrorMessage = errMsg
-				pages[i].UpdatedAt = &now
+				pages[i].OCRCompletedAt = &now
 				break
 			}
 		}
@@ -384,7 +457,6 @@ func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) er
 	}
 
 	if r.dbClient != nil {
-		// Note: page_count is a GENERATED ALWAYS column in PostgreSQL, so we omit it from the INSERT payload
 		payload := map[string]interface{}{
 			"id":                        seg.ID,
 			"document_id":               seg.DocumentID,
@@ -392,6 +464,7 @@ func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) er
 			"document_type":             seg.DocumentType,
 			"start_page":                seg.StartPage,
 			"end_page":                  seg.EndPage,
+			"page_count":                seg.PageCount,
 			"classification_confidence": seg.ClassificationConfidence,
 			"classification_method":     seg.ClassificationMethod,
 			"extraction_status":         seg.ExtractionStatus,
@@ -408,7 +481,10 @@ func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) er
 			payload["error_message"] = seg.ErrorMessage
 		}
 		var created []DocumentSegment
-		_ = r.dbClient.Insert(ctx, "document_segments", payload, &created)
+		err := r.dbClient.Insert(ctx, "document_segments", payload, &created)
+		if err != nil {
+			fmt.Printf("[ResourceDB.InsertSegment] Error inserting segment %d: %v\n", seg.SegmentNumber, err)
+		}
 	}
 
 	r.mu.Lock()

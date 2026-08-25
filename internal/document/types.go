@@ -22,22 +22,21 @@ type Document struct {
 
 // DocumentPage represents an individual page record within a multi-page document
 type DocumentPage struct {
-	ID                       string     `json:"id"`
-	DocumentID               string     `json:"document_id"`
-	PageNumber               int        `json:"page_number"`
-	StoragePath              string     `json:"storage_path,omitempty"`
-	PreprocessedStoragePath  string     `json:"preprocessed_storage_path,omitempty"`
-	Status                   string     `json:"status"` // PENDING, PREPROCESSED, CLASSIFIED, OCR_COMPLETED, EXTRACTED, FAILED
-	Classification           string     `json:"classification,omitempty"`
-	ClassificationConfidence float64    `json:"classification_confidence,omitempty"`
-	OCREngine                string     `json:"ocr_engine,omitempty"`
-	ClassifierModel          string     `json:"classifier_model,omitempty"`
-	LineCount                int        `json:"line_count,omitempty"`
-	SignaturePresent         bool       `json:"signature_present,omitempty"`
-	ErrorMessage             string     `json:"error_message,omitempty"`
-	RetryCount               int        `json:"retry_count"`
-	CreatedAt                time.Time  `json:"created_at"`
-	UpdatedAt                *time.Time `json:"updated_at,omitempty"`
+	ID             string                 `json:"id"`
+	DocumentID     string                 `json:"document_id"`
+	PageNumber     int                    `json:"page_number"`
+	Width          int                    `json:"width"`
+	Height         int                    `json:"height"`
+	OCRText        string                 `json:"ocr_text,omitempty"`
+	OCRConfidence  float64                `json:"ocr_confidence"`
+	LayoutJSON     map[string]interface{} `json:"layout_json,omitempty"`
+	SegmentID      string                 `json:"segment_id,omitempty"`
+	OCRResult      map[string]interface{} `json:"ocr_result,omitempty"`
+	OCREngineUsed  string                 `json:"ocr_engine_used,omitempty"`
+	PageWidthPts   float64                `json:"page_width_pts,omitempty"`
+	PageHeightPts  float64                `json:"page_height_pts,omitempty"`
+	OCRCompletedAt *time.Time             `json:"ocr_completed_at,omitempty"`
+	CreatedAt      time.Time              `json:"created_at"`
 }
 
 // DocumentSegment represents a logical document boundary within a multi-page physical file

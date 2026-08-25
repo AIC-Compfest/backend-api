@@ -275,10 +275,10 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		pageCount = len(aiResult.Pages)
 	}
 
-	docClass := initialClass
+	docClass := normalizeDocumentType(initialClass)
 	docConf := initialConf
 	if aiResult != nil && len(aiResult.Segments) > 1 {
-		docClass = "MULTI_DOC_BUNDLE"
+		docClass = "UNKNOWN" // Supabase documents CHECK constraint allows INVOICE, SURAT_JALAN, POD, RATE_AGREEMENT, UNKNOWN
 		var sumConf float64
 		for _, seg := range aiResult.Segments {
 			sumConf += seg.ClassificationConfidence
@@ -287,7 +287,7 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 			docConf = sumConf / float64(len(aiResult.Segments))
 		}
 	} else if aiResult != nil && len(aiResult.Segments) == 1 {
-		docClass = aiResult.Segments[0].DocumentType
+		docClass = normalizeDocumentType(aiResult.Segments[0].DocumentType)
 		docConf = aiResult.Segments[0].ClassificationConfidence
 	}
 
@@ -310,63 +310,7 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		return nil, fmt.Errorf("failed to save document metadata: %w", err)
 	}
 
-
-	// Persist per-page records into document_pages table in Supabase
-	var createdPages []DocumentPage
-	if aiResult != nil && len(aiResult.Pages) > 0 {
-		for _, p := range aiResult.Pages {
-			pClass := initialClass
-			pConf := initialConf
-			pModel := "doc-classifier-v1"
-			if pc, ok := p.Classification["document_type"].(string); ok && pc != "" {
-				pClass = pc
-			}
-			if pcf, ok := p.Classification["confidence"].(float64); ok && pcf > 0 {
-				pConf = pcf
-			}
-			if pmd, ok := p.Classification["model_version"].(string); ok && pmd != "" {
-				pModel = pmd
-			}
-			sigPresent := false
-			if sp, ok := p.SignatureDetection["signature_present"].(bool); ok {
-				sigPresent = sp
-			}
-
-			pageRecord := DocumentPage{
-				ID:                       model.NewUUID(),
-				DocumentID:               doc.ID,
-				PageNumber:               p.PageNumber,
-				StoragePath:              storagePath,
-				Status:                   "EXTRACTED",
-				Classification:           pClass,
-				ClassificationConfidence: pConf,
-				OCREngine:                "pymupdf_vector",
-				ClassifierModel:          pModel,
-				LineCount:                p.LineCount,
-				SignaturePresent:         sigPresent,
-				CreatedAt:                now,
-			}
-			_ = r.db.InsertPage(ctx, &pageRecord)
-			createdPages = append(createdPages, pageRecord)
-		}
-	} else {
-		pageRecord := DocumentPage{
-			ID:                       model.NewUUID(),
-			DocumentID:               doc.ID,
-			PageNumber:               1,
-			StoragePath:              storagePath,
-			Status:                   "EXTRACTED",
-			Classification:           initialClass,
-			ClassificationConfidence: initialConf,
-			OCREngine:                "pymupdf_vector",
-			ClassifierModel:          "doc-classifier-v1",
-			CreatedAt:                now,
-		}
-		_ = r.db.InsertPage(ctx, &pageRecord)
-		createdPages = append(createdPages, pageRecord)
-	}
-
-	// Persist segments into document_segments table in Supabase (ARCHITECTURE ROOT CAUSE A FIX)
+	// 5. Persist segments into document_segments table in Supabase
 	var createdSegments []DocumentSegment
 	if aiResult != nil && len(aiResult.Segments) > 0 {
 		for _, s := range aiResult.Segments {
@@ -374,11 +318,15 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 			if s.ClassificationMethod != "" {
 				sMethod = s.ClassificationMethod
 			}
+			segType := normalizeDocumentType(s.DocumentType)
+			if segType == "UNKNOWN" && initialClass != "" {
+				segType = normalizeDocumentType(initialClass)
+			}
 			segRecord := DocumentSegment{
 				ID:                       model.NewUUID(),
 				DocumentID:               doc.ID,
 				SegmentNumber:            s.SegmentNumber,
-				DocumentType:             s.DocumentType,
+				DocumentType:             segType,
 				StartPage:                s.StartPage,
 				EndPage:                  s.EndPage,
 				PageCount:                s.PageCount,
@@ -396,7 +344,7 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 			ID:                       model.NewUUID(),
 			DocumentID:               doc.ID,
 			SegmentNumber:            1,
-			DocumentType:             initialClass,
+			DocumentType:             normalizeDocumentType(initialClass),
 			StartPage:                1,
 			EndPage:                  pageCount,
 			PageCount:                pageCount,
@@ -407,6 +355,67 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		}
 		_ = r.db.InsertSegment(ctx, &segRecord)
 		createdSegments = append(createdSegments, segRecord)
+	}
+
+	// 6. Persist per-page records into document_pages table in Supabase
+	var createdPages []DocumentPage
+	if aiResult != nil && len(aiResult.Pages) > 0 {
+		for _, p := range aiResult.Pages {
+			pConf := initialConf
+			if pcf, ok := p.Classification["confidence"].(float64); ok && pcf > 0 {
+				pConf = pcf
+			}
+
+			// Find corresponding segment for this page
+			var pageSegID string
+			for _, seg := range createdSegments {
+				if p.PageNumber >= seg.StartPage && p.PageNumber <= seg.EndPage {
+					pageSegID = seg.ID
+					break
+				}
+			}
+			if pageSegID == "" && len(createdSegments) > 0 {
+				pageSegID = createdSegments[0].ID
+			}
+
+			pageRecord := DocumentPage{
+				ID:             model.NewUUID(),
+				DocumentID:     doc.ID,
+				PageNumber:     p.PageNumber,
+				Width:          595,
+				Height:         842,
+				PageWidthPts:   595.0,
+				PageHeightPts:  842.0,
+				OCRConfidence:  pConf,
+				OCREngineUsed:  "pymupdf_vector",
+				SegmentID:      pageSegID,
+				OCRCompletedAt: &now,
+				CreatedAt:      now,
+			}
+			_ = r.db.InsertPage(ctx, &pageRecord)
+			createdPages = append(createdPages, pageRecord)
+		}
+	} else {
+		var pageSegID string
+		if len(createdSegments) > 0 {
+			pageSegID = createdSegments[0].ID
+		}
+		pageRecord := DocumentPage{
+			ID:             model.NewUUID(),
+			DocumentID:     doc.ID,
+			PageNumber:     1,
+			Width:          595,
+			Height:         842,
+			PageWidthPts:   595.0,
+			PageHeightPts:  842.0,
+			OCRConfidence:  initialConf,
+			OCREngineUsed:  "pymupdf_vector",
+			SegmentID:      pageSegID,
+			OCRCompletedAt: &now,
+			CreatedAt:      now,
+		}
+		_ = r.db.InsertPage(ctx, &pageRecord)
+		createdPages = append(createdPages, pageRecord)
 	}
 
 	// Save extraction record to document_extractions table in Supabase
@@ -958,6 +967,21 @@ func extractCanonicalEntities(
 	return invCanon, sjCanon, podCanon, ctrCanon
 }
 
+func normalizeDocumentType(dt string) string {
+	switch strings.ToUpper(strings.TrimSpace(dt)) {
+	case "INVOICE":
+		return "INVOICE"
+	case "SURAT_JALAN":
+		return "SURAT_JALAN"
+	case "POD":
+		return "POD"
+	case "RATE_AGREEMENT":
+		return "RATE_AGREEMENT"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 // GetPipelineStatus returns multi-page processing progress for a document
 func (r *Resource) GetPipelineStatus(ctx context.Context, id string) (*PipelineStatusResponse, error) {
 	doc, err := r.db.FindByID(ctx, id)
@@ -966,15 +990,8 @@ func (r *Resource) GetPipelineStatus(ctx context.Context, id string) (*PipelineS
 	}
 
 	pages, _ := r.db.ListPages(ctx, id)
-	processedCount := 0
+	processedCount := len(pages)
 	failedCount := 0
-	for _, p := range pages {
-		if p.Status == "EXTRACTED" || p.Status == "OCR_COMPLETED" {
-			processedCount++
-		} else if p.Status == "FAILED" {
-			failedCount++
-		}
-	}
 
 	pageCount := doc.PageCount
 	if pageCount == 0 && len(pages) > 0 {
@@ -1019,10 +1036,9 @@ func (r *Resource) RetryPage(ctx context.Context, id string, pageNumber int) (*D
 		return nil, err
 	}
 
-	page.RetryCount++
-	page.Status = "EXTRACTED"
-	page.ErrorMessage = ""
-	_ = r.db.UpdatePageStatus(ctx, id, pageNumber, page.Status, "")
+	now := time.Now().UTC()
+	page.OCRCompletedAt = &now
+	_ = r.db.UpdatePageStatus(ctx, id, pageNumber, "EXTRACTED", "")
 
 	return page, nil
 }
