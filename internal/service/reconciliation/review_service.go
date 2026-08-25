@@ -247,21 +247,6 @@ func (s *ReviewService) GetQueue(statusFilter, severityFilter, vendorFilter, sea
 	var summary QueueSummary
 
 	for _, ev := range s.events {
-		summary.TotalInvoicesCount++
-		summary.TotalInvoicedAmount += ev.Invoice.BilledAmount
-
-		if ev.Reconciliation.Status == model.StatusMatch {
-			summary.MatchesCount++
-		} else {
-			summary.OpenExceptionsCount++
-			if ev.Pricing.DifferenceAmount > 0 {
-				summary.TotalVarianceAmount += ev.Pricing.DifferenceAmount
-			}
-			if ev.Reconciliation.DaysRemainingToDispute <= 7 {
-				summary.UrgentDisputesCount++
-			}
-		}
-
 		// Apply Filters
 		if statusFilter != "" && statusFilter != "ALL" && string(ev.Reconciliation.Status) != statusFilter {
 			continue
@@ -276,6 +261,22 @@ func (s *ReviewService) GetQueue(statusFilter, severityFilter, vendorFilter, sea
 			vendor := strings.ToLower(ev.VendorID)
 			if !strings.Contains(invNo, q) && !strings.Contains(shpID, q) && !strings.Contains(vendor, q) {
 				continue
+			}
+		}
+
+		// Accumulate summary ONLY on items that match the filter
+		summary.TotalInvoicesCount++
+		summary.TotalInvoicedAmount += ev.Invoice.BilledAmount
+
+		if ev.Reconciliation.Status == model.StatusMatch {
+			summary.MatchesCount++
+		} else {
+			summary.OpenExceptionsCount++
+			if ev.Pricing.DifferenceAmount > 0 {
+				summary.TotalVarianceAmount += ev.Pricing.DifferenceAmount
+			}
+			if ev.Reconciliation.DaysRemainingToDispute <= 7 {
+				summary.UrgentDisputesCount++
 			}
 		}
 

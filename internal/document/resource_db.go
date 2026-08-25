@@ -437,3 +437,43 @@ func (r *ResourceDB) ListSegments(ctx context.Context, docID string) ([]Document
 	}
 	return []DocumentSegment{}, nil
 }
+
+// InsertFieldEvidence saves individual extracted field evidence with BBox into field_evidence table
+func (r *ResourceDB) InsertFieldEvidence(ctx context.Context, payload map[string]interface{}) error {
+	if r.dbClient != nil {
+		var out []map[string]interface{}
+		_ = r.dbClient.Insert(ctx, "field_evidence", payload, &out)
+	}
+	return nil
+}
+
+// EnsureVendorExists checks if vendor_id is in vendors table, if not inserts it automatically
+func (r *ResourceDB) EnsureVendorExists(ctx context.Context, vendorID, vendorName string) {
+	if vendorID == "" || r.dbClient == nil {
+		return
+	}
+	if vendorName == "" {
+		vendorName = vendorID
+	}
+
+	var existing []map[string]interface{}
+	params := url.Values{}
+	params.Set("vendor_id", "eq."+vendorID)
+	params.Set("limit", "1")
+	if err := r.dbClient.Query(ctx, "vendors", params, &existing); err == nil && len(existing) > 0 {
+		return
+	}
+
+	now := time.Now().UTC()
+	payload := map[string]interface{}{
+		"id":          model.NewUUID(),
+		"vendor_id":   vendorID,
+		"vendor_name": vendorName,
+		"is_active":   true,
+		"created_at":  now,
+		"updated_at":  now,
+	}
+	var out []map[string]interface{}
+	_ = r.dbClient.Insert(ctx, "vendors", payload, &out)
+	fmt.Printf("[Auto-Vendor Pipeline] Registered new vendor in DB: %s (%s)\n", vendorID, vendorName)
+}

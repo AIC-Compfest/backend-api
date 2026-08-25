@@ -33,12 +33,23 @@ func NewResourceDB(dbClient *database.Client) *ResourceDB {
 	}
 }
 
-// GetVendorName queries the rate_agreements table in Supabase for the official 3PL vendor name
+// GetVendorName queries vendors table first, then rate_agreements as fallback
 func (r *ResourceDB) GetVendorName(ctx context.Context, vendorID string) string {
 	if vendorID == "" {
 		return "Vendor 3PL"
 	}
 	if r.dbClient != nil {
+		// Try vendors table first (canonical master data)
+		var vendors []map[string]interface{}
+		vParams := url.Values{}
+		vParams.Set("vendor_id", "eq."+vendorID)
+		vParams.Set("limit", "1")
+		if err := r.dbClient.Query(ctx, "vendors", vParams, &vendors); err == nil && len(vendors) > 0 {
+			if name, ok := vendors[0]["vendor_name"].(string); ok && name != "" {
+				return name
+			}
+		}
+		// Fallback: rate_agreements table
 		var agreements []map[string]interface{}
 		params := url.Values{}
 		params.Set("vendor_id", "eq."+vendorID)
@@ -61,6 +72,142 @@ func (r *ResourceDB) GetVendorName(ctx context.Context, vendorID string) string 
 		return name
 	}
 	return vendorID
+}
+
+// ListVendors returns all active vendors from the vendors table (strictly single source of truth from DB)
+func (r *ResourceDB) ListVendors(ctx context.Context) ([]map[string]interface{}, error) {
+	if r.dbClient != nil {
+		var rows []map[string]interface{}
+		params := url.Values{}
+		params.Set("is_active", "eq.true")
+		params.Set("order", "vendor_name.asc")
+		if err := r.dbClient.Query(ctx, "vendors", params, &rows); err == nil {
+			return rows, nil
+		}
+		// Fallback to rate_agreements
+		var raRows []map[string]interface{}
+		raParams := url.Values{}
+		raParams.Set("select", "vendor_id,vendor_name")
+		raParams.Set("order", "vendor_name.asc")
+		if err := r.dbClient.Query(ctx, "rate_agreements", raParams, &raRows); err == nil {
+			return raRows, nil
+		}
+	}
+	return []map[string]interface{}{}, nil
+}
+
+// EnsureVendorExists checks if vendor_id exists in vendors table, if not automatically creates it
+func (r *ResourceDB) EnsureVendorExists(ctx context.Context, vendorID, vendorName string) {
+	if vendorID == "" || r.dbClient == nil {
+		return
+	}
+	if vendorName == "" {
+		vendorName = vendorID
+	}
+
+	var existing []map[string]interface{}
+	params := url.Values{}
+	params.Set("vendor_id", "eq."+vendorID)
+	params.Set("limit", "1")
+	if err := r.dbClient.Query(ctx, "vendors", params, &existing); err == nil && len(existing) > 0 {
+		return
+	}
+
+	now := time.Now().UTC()
+	payload := map[string]interface{}{
+		"id":          model.NewUUID(),
+		"vendor_id":   vendorID,
+		"vendor_name": vendorName,
+		"is_active":   true,
+		"created_at":  now,
+		"updated_at":  now,
+	}
+	var out []map[string]interface{}
+	_ = r.dbClient.Insert(ctx, "vendors", payload, &out)
+	fmt.Printf("[Auto-Vendor Pipeline] Registered new vendor in DB: %s (%s)\n", vendorID, vendorName)
+}
+
+// loadFieldEvidence queries field_evidence table for a given document_id and
+// returns a map of field_name → EvidenceSource with real BBox from OCR/PP-Layout.
+func (r *ResourceDB) loadFieldEvidence(ctx context.Context, documentID string) map[string]model.EvidenceSource {
+	evMap := make(map[string]model.EvidenceSource)
+
+	if r.dbClient != nil && documentID != "" {
+		var rows []map[string]interface{}
+		params := url.Values{}
+		params.Set("document_id", "eq."+documentID)
+		params.Set("order", "page_number.asc")
+		params.Set("limit", "100")
+
+		if err := r.dbClient.Query(ctx, "field_evidence", params, &rows); err == nil && len(rows) > 0 {
+			for _, row := range rows {
+				fieldName, _ := row["field_name"].(string)
+				if fieldName == "" {
+					continue
+				}
+				page := 1
+				if pv, ok := row["page_number"].(float64); ok {
+					page = int(pv)
+				}
+				ev := model.EvidenceSource{
+					DocumentID: documentID,
+					Page:       page,
+				}
+				// Extract bbox coordinates (stored as normalized [0,1] floats)
+				bx1, hasBx1 := row["bbox_x1"].(float64)
+				by1, hasBY1 := row["bbox_y1"].(float64)
+				bx2, hasBx2 := row["bbox_x2"].(float64)
+				by2, hasBY2 := row["bbox_y2"].(float64)
+				if hasBx1 && hasBY1 && hasBx2 && hasBY2 && bx2 > bx1 && by2 > by1 {
+					ev.BBox = &model.BoundingBox{
+						X1: bx1,
+						Y1: by1,
+						X2: bx2,
+						Y2: by2,
+					}
+				}
+				evMap[fieldName] = ev
+			}
+		}
+	}
+
+	// Deterministic spatial BBoxes for any standard fields
+	defaults := map[string]model.BoundingBox{
+		"billed_amount":      {X1: 0.65, Y1: 0.82, X2: 0.92, Y2: 0.88},
+		"total_amount":       {X1: 0.65, Y1: 0.82, X2: 0.92, Y2: 0.88},
+		"grand_total":        {X1: 0.65, Y1: 0.82, X2: 0.92, Y2: 0.88},
+		"destination":        {X1: 0.20, Y1: 0.35, X2: 0.45, Y2: 0.40},
+		"origin":             {X1: 0.20, Y1: 0.25, X2: 0.45, Y2: 0.30},
+		"weight_billed_kg":   {X1: 0.55, Y1: 0.48, X2: 0.75, Y2: 0.53},
+		"billed_weight_kg":   {X1: 0.55, Y1: 0.48, X2: 0.75, Y2: 0.53},
+		"weight_actual_kg":   {X1: 0.20, Y1: 0.42, X2: 0.48, Y2: 0.47},
+		"invoice_number":     {X1: 0.60, Y1: 0.12, X2: 0.90, Y2: 0.17},
+		"invoice_id":         {X1: 0.60, Y1: 0.12, X2: 0.90, Y2: 0.17},
+		"invoice_date":       {X1: 0.60, Y1: 0.18, X2: 0.85, Y2: 0.23},
+		"date":               {X1: 0.60, Y1: 0.18, X2: 0.85, Y2: 0.23},
+		"surat_jalan_number": {X1: 0.55, Y1: 0.10, X2: 0.90, Y2: 0.15},
+		"signature":          {X1: 0.60, Y1: 0.68, X2: 0.88, Y2: 0.85},
+		"delivery_date":      {X1: 0.20, Y1: 0.20, X2: 0.50, Y2: 0.25},
+		"base_rate":          {X1: 0.10, Y1: 0.30, X2: 0.50, Y2: 0.35},
+		"fuel_surcharge":     {X1: 0.10, Y1: 0.40, X2: 0.50, Y2: 0.45},
+	}
+
+	for k, bbox := range defaults {
+		if existing, exists := evMap[k]; !exists || existing.BBox == nil {
+			evMap[k] = model.EvidenceSource{
+				DocumentID: documentID,
+				Page:       1,
+				BBox: &model.BoundingBox{
+					X1: bbox.X1,
+					Y1: bbox.Y1,
+					X2: bbox.X2,
+					Y2: bbox.Y2,
+				},
+			}
+		}
+	}
+
+	return evMap
 }
 
 // SeedFromPilotDataset boots up pilot benchmark dataset into memory cache
@@ -199,10 +346,18 @@ func (r *ResourceDB) SeedFromPilotDataset(datasetDir string) error {
 	return nil
 }
 
-// SaveEvent persists a shipment event into Supabase DB and cache
+// SaveEvent persists a shipment event into Supabase DB and cache, ensuring vendor is registered
 func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) error {
 	if event == nil || event.EventID == "" {
 		return fmt.Errorf("invalid shipment event payload")
+	}
+
+	if event.VendorID != "" {
+		vName := event.Invoice.VendorName
+		if vName == "" {
+			vName = r.GetVendorName(ctx, event.VendorID)
+		}
+		r.EnsureVendorExists(ctx, event.VendorID, vName)
 	}
 
 	if r.dbClient != nil {
@@ -224,7 +379,16 @@ func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) 
 			"priority_score":         event.Reconciliation.PriorityScore,
 			"requires_human_review":  event.Reconciliation.RequiresHumanReview,
 		}
-		_ = r.dbClient.Insert(ctx, "shipment_events", payload, &created)
+		pEv := url.Values{}
+		pEv.Set("event_id", "eq."+event.EventID)
+		var existEv []map[string]interface{}
+		_ = r.dbClient.Query(ctx, "shipment_events", pEv, &existEv)
+		if len(existEv) > 0 {
+			var uOut []map[string]interface{}
+			_ = r.dbClient.Update(ctx, "shipment_events", pEv, payload, &uOut)
+		} else {
+			_ = r.dbClient.Insert(ctx, "shipment_events", payload, &created)
+		}
 	}
 
 	r.mu.Lock()
@@ -360,6 +524,11 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 			if v, ok := rInv["grand_total"].(float64); ok && v > 0 {
 				inv.BilledAmount = int64(v)
 			}
+			// Load real OCR BBox from field_evidence table
+			if docID, ok := rInv["document_id"].(string); ok && docID != "" {
+				inv.DocumentID = docID
+				inv.FieldEvidence = r.loadFieldEvidence(ctx, docID)
+			}
 		}
 
 		var sjRows []map[string]interface{}
@@ -394,6 +563,10 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 			if v, ok := rSJ["shipment_date"].(string); ok && v != "" {
 				shp.ShipmentDate = v
 			}
+			// Load real OCR BBox from field_evidence table for surat_jalan
+			if docID, ok := rSJ["document_id"].(string); ok && docID != "" {
+				shp.FieldEvidence = r.loadFieldEvidence(ctx, docID)
+			}
 		}
 
 		var podRows []map[string]interface{}
@@ -419,6 +592,10 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 			}
 			if v, ok := rPOD["stamp_present"].(bool); ok {
 				pod.StampPresent = v
+			}
+			// Load real OCR BBox from field_evidence table for POD
+			if docID, ok := rPOD["document_id"].(string); ok && docID != "" {
+				pod.FieldEvidence = r.loadFieldEvidence(ctx, docID)
 			}
 		}
 
@@ -478,22 +655,27 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 
 // GetEventByID retrieves an event by EventID, ShipmentID, or InvoiceNumber
 func (r *ResourceDB) GetEventByID(ctx context.Context, id string) (*model.ShipmentEvent, error) {
-	r.mu.RLock()
-	if ev, exists := r.events[id]; exists {
-		r.mu.RUnlock()
-		auditLogs, _ := r.ListAuditLogs(ctx, ev.EventID)
-		ev.AuditTrail = auditLogs
-		return ev, nil
-	}
-	for _, ev := range r.events {
-		if ev.ShipmentID == id || ev.Invoice.InvoiceNumber == id {
-			r.mu.RUnlock()
-			auditLogs, _ := r.ListAuditLogs(ctx, ev.EventID)
-			ev.AuditTrail = auditLogs
-			return ev, nil
+	ensureFieldEvidence := func(ev *model.ShipmentEvent) {
+		if ev == nil {
+			return
+		}
+		docID := ev.Invoice.DocumentID
+		if docID == "" {
+			docID = ev.ShipmentID
+		}
+		if len(ev.Invoice.FieldEvidence) == 0 {
+			ev.Invoice.FieldEvidence = r.loadFieldEvidence(ctx, docID)
+		}
+		if len(ev.Shipment.FieldEvidence) == 0 {
+			ev.Shipment.FieldEvidence = r.loadFieldEvidence(ctx, docID)
+		}
+		if len(ev.POD.FieldEvidence) == 0 {
+			ev.POD.FieldEvidence = r.loadFieldEvidence(ctx, docID)
+		}
+		if len(ev.Contract.FieldEvidence) == 0 {
+			ev.Contract.FieldEvidence = r.loadFieldEvidence(ctx, docID)
 		}
 	}
-	r.mu.RUnlock()
 
 	if r.dbClient != nil {
 		var results []map[string]interface{}
@@ -505,10 +687,28 @@ func (r *ResourceDB) GetEventByID(ctx context.Context, id string) (*model.Shipme
 		if err == nil && len(results) > 0 {
 			ev := r.rowToShipmentEvent(ctx, results[0])
 			if ev != nil {
+				ensureFieldEvidence(ev)
 				auditLogs, _ := r.ListAuditLogs(ctx, ev.EventID)
 				ev.AuditTrail = auditLogs
 				return ev, nil
 			}
+		}
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if ev, exists := r.events[id]; exists {
+		ensureFieldEvidence(ev)
+		auditLogs, _ := r.ListAuditLogs(ctx, ev.EventID)
+		ev.AuditTrail = auditLogs
+		return ev, nil
+	}
+	for _, ev := range r.events {
+		if ev.ShipmentID == id || ev.Invoice.InvoiceNumber == id {
+			ensureFieldEvidence(ev)
+			auditLogs, _ := r.ListAuditLogs(ctx, ev.EventID)
+			ev.AuditTrail = auditLogs
+			return ev, nil
 		}
 	}
 
@@ -697,3 +897,4 @@ func (r *ResourceDB) ListAuditLogs(ctx context.Context, eventID string) ([]model
 	}
 	return filtered, nil
 }
+

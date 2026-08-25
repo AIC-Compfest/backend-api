@@ -115,10 +115,42 @@ func DisputePackage(res *reconciliation.Resource) gin.HandlerFunc {
 
 		pkg, err := res.GetDisputePackage(c.Request.Context(), id, reviewer)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			c.JSON(404, gin.H{"error": err.Error()})
 			return
 		}
 
-		c.JSON(http.StatusOK, pkg)
+		c.JSON(200, pkg)
+	}
+}
+
+// Vendors handles GET /api/v1/vendors
+// Returns all active 3PL logistics partners from the vendors table
+func Vendors(res *reconciliation.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		vendors, err := res.GetVendors(c.Request.Context())
+		if err != nil {
+			c.JSON(500, gin.H{"error": "Gagal mengambil data vendor: " + err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{
+			"vendors": vendors,
+			"total":   len(vendors),
+		})
+	}
+}
+
+// AuditAll handles GET /api/v1/audit/all
+// Returns all audit trail events for the global Audit Ledger page
+func AuditAll(res *reconciliation.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		logs, err := res.GetAllAuditLogs(c.Request.Context())
+		if err != nil {
+			c.JSON(500, gin.H{"error": "Gagal mengambil audit log: " + err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{
+			"audit_trail": logs,
+			"total":       len(logs),
+		})
 	}
 }

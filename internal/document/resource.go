@@ -38,9 +38,11 @@ type EventSink interface {
 
 // AIExtractedField represents one extracted key-value pair from AI Pipeline
 type AIExtractedField struct {
-	Field      string      `json:"field"`
-	Value      interface{} `json:"value"`
-	Confidence float64     `json:"confidence"`
+	Field      string               `json:"field"`
+	Value      interface{}          `json:"value"`
+	Confidence float64              `json:"confidence"`
+	Source     model.EvidenceSource `json:"source,omitempty"`
+	Method     string               `json:"method,omitempty"`
 }
 
 // AIPageResult represents per-page understanding emitted by Phase 5 AI Pipeline
@@ -85,11 +87,11 @@ type AIExtractionResult struct {
 	SegmentExtractions    []AISegmentExtraction         `json:"segment_extractions"`
 	LogicalDocumentGroups map[string][]int              `json:"logical_document_groups"`
 	Pages                 []AIPageResult                `json:"pages"`
-	ExtractedFields       []AIExtractedField            `json:"extracted_fields"`
-	LogicalExtractions    map[string][]AIExtractedField `json:"logical_extractions"`
+	RawExtractedFields    json.RawMessage               `json:"extracted_fields"`
+	ExtractedFields       []AIExtractedField            `json:"-"`
+	LogicalExtractions    map[string][]AIExtractedField `json:"-"`
 	ErrorCode             string                        `json:"error_code"`
 }
-
 
 // Resource handles document business logic, AI extraction, and file storage
 type Resource struct {
@@ -162,6 +164,23 @@ func (r *Resource) extractViaAI(ctx context.Context, filename string, fileBytes 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
+
+	result.LogicalExtractions = make(map[string][]AIExtractedField)
+	if len(result.RawExtractedFields) > 0 {
+		var arr []AIExtractedField
+		if err := json.Unmarshal(result.RawExtractedFields, &arr); err == nil {
+			result.ExtractedFields = arr
+		} else {
+			var m map[string][]AIExtractedField
+			if err := json.Unmarshal(result.RawExtractedFields, &m); err == nil {
+				result.LogicalExtractions = m
+				for _, fields := range m {
+					result.ExtractedFields = append(result.ExtractedFields, fields...)
+				}
+			}
+		}
+	}
+
 	return &result, nil
 }
 
@@ -393,6 +412,111 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 	// Save extraction record to document_extractions table in Supabase
 	_ = r.db.InsertExtraction(ctx, doc.ID, extractedFieldsMap, initialConf)
 
+	// Persist field_evidence rows with OCR bounding boxes (PRD §18, Migration 008)
+	defaultSegID := doc.ID
+	if len(createdSegments) > 0 {
+		defaultSegID = createdSegments[0].ID
+	}
+
+	if aiResult != nil {
+		// 1. From LogicalExtractions (Multi-page logical doc groups)
+		if len(aiResult.LogicalExtractions) > 0 {
+			for docType, fields := range aiResult.LogicalExtractions {
+				segID := defaultSegID
+				for _, cs := range createdSegments {
+					if cs.DocumentType == docType {
+						segID = cs.ID
+						break
+					}
+				}
+				for _, f := range fields {
+					page := f.Source.Page
+					if page <= 0 {
+						page = 1
+					}
+					fePayload := map[string]interface{}{
+						"id":               model.NewUUID(),
+						"document_id":      doc.ID,
+						"segment_id":       segID,
+						"page_number":      page,
+						"field_name":       f.Field,
+						"field_value":      fmt.Sprintf("%v", f.Value),
+						"confidence":       f.Confidence,
+						"coordinate_space": "normalized_01",
+						"created_at":       now,
+					}
+					if f.Source.BBox != nil {
+						fePayload["bbox_x1"] = f.Source.BBox.X1
+						fePayload["bbox_y1"] = f.Source.BBox.Y1
+						fePayload["bbox_x2"] = f.Source.BBox.X2
+						fePayload["bbox_y2"] = f.Source.BBox.Y2
+					}
+					_ = r.db.InsertFieldEvidence(ctx, fePayload)
+				}
+			}
+		}
+
+		// 2. From SegmentExtractions
+		for _, se := range aiResult.SegmentExtractions {
+			segID := defaultSegID
+			for _, cs := range createdSegments {
+				if cs.SegmentNumber == se.SegmentNumber {
+					segID = cs.ID
+					break
+				}
+			}
+			for _, f := range se.ExtractedFields {
+				page := f.Source.Page
+				if page <= 0 {
+					page = 1
+				}
+				fePayload := map[string]interface{}{
+					"id":               model.NewUUID(),
+					"document_id":      doc.ID,
+					"segment_id":       segID,
+					"page_number":      page,
+					"field_name":       f.Field,
+					"field_value":      fmt.Sprintf("%v", f.Value),
+					"confidence":       f.Confidence,
+					"coordinate_space": "normalized_01",
+					"created_at":       now,
+				}
+				if f.Source.BBox != nil {
+					fePayload["bbox_x1"] = f.Source.BBox.X1
+					fePayload["bbox_y1"] = f.Source.BBox.Y1
+					fePayload["bbox_x2"] = f.Source.BBox.X2
+					fePayload["bbox_y2"] = f.Source.BBox.Y2
+				}
+				_ = r.db.InsertFieldEvidence(ctx, fePayload)
+			}
+		}
+
+		// 3. From general ExtractedFields
+		for _, f := range aiResult.ExtractedFields {
+			page := f.Source.Page
+			if page <= 0 {
+				page = 1
+			}
+			fePayload := map[string]interface{}{
+				"id":               model.NewUUID(),
+				"document_id":      doc.ID,
+				"segment_id":       defaultSegID,
+				"page_number":      page,
+				"field_name":       f.Field,
+				"field_value":      fmt.Sprintf("%v", f.Value),
+				"confidence":       f.Confidence,
+				"coordinate_space": "normalized_01",
+				"created_at":       now,
+			}
+			if f.Source.BBox != nil {
+				fePayload["bbox_x1"] = f.Source.BBox.X1
+				fePayload["bbox_y1"] = f.Source.BBox.Y1
+				fePayload["bbox_x2"] = f.Source.BBox.X2
+				fePayload["bbox_y2"] = f.Source.BBox.Y2
+			}
+			_ = r.db.InsertFieldEvidence(ctx, fePayload)
+		}
+	}
 
 	// Extract real canonical entities from AI extraction results
 	invCanon, sjCanon, podCanon, ctrCanon := extractCanonicalEntities(doc.ID, hashStr, fileHeader.Filename, aiResult, extractedFieldsMap, now)
@@ -433,6 +557,9 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 	}
 
 	if invCanon != nil {
+		if invCanon.VendorID != "" {
+			r.db.EnsureVendorExists(ctx, invCanon.VendorID, invCanon.VendorName)
+		}
 		_ = r.db.InsertInvoice(ctx, map[string]interface{}{
 			"id":             model.NewUUID(),
 			"document_id":    doc.ID,
@@ -454,6 +581,9 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		vendorName := ctrCanon.VendorID
 		if invCanon != nil && invCanon.VendorName != "" {
 			vendorName = invCanon.VendorName
+		}
+		if ctrCanon.VendorID != "" {
+			r.db.EnsureVendorExists(ctx, ctrCanon.VendorID, vendorName)
 		}
 		effFrom := ctrCanon.EffectiveFrom
 		if effFrom == "" {
@@ -535,6 +665,30 @@ func extractCanonicalEntities(
 	podFields := make(map[string]model.ExtractedField)
 	raFields := make(map[string]model.ExtractedField)
 
+	if aiResult != nil && len(aiResult.LogicalExtractions) > 0 {
+		for docType, fields := range aiResult.LogicalExtractions {
+			for _, f := range fields {
+				ef := model.ExtractedField{
+					Field:      f.Field,
+					Value:      f.Value,
+					Confidence: f.Confidence,
+					Source:     f.Source,
+					Method:     model.ExtractionMethod(f.Method),
+				}
+				switch docType {
+				case "INVOICE":
+					invFields[f.Field] = ef
+				case "SURAT_JALAN":
+					sjFields[f.Field] = ef
+				case "POD":
+					podFields[f.Field] = ef
+				case "RATE_AGREEMENT":
+					raFields[f.Field] = ef
+				}
+			}
+		}
+	}
+
 	if aiResult != nil && len(aiResult.SegmentExtractions) > 0 {
 		for _, se := range aiResult.SegmentExtractions {
 			for _, f := range se.ExtractedFields {
@@ -557,8 +711,11 @@ func extractCanonicalEntities(
 		for _, f := range aiResult.ExtractedFields {
 			if _, ok := invFields[f.Field]; !ok {
 				invFields[f.Field] = model.ExtractedField{
-					Field: f.Field,
-					Value: f.Value,
+					Field:      f.Field,
+					Value:      f.Value,
+					Confidence: f.Confidence,
+					Source:     f.Source,
+					Method:     model.ExtractionMethod(f.Method),
 				}
 			}
 		}

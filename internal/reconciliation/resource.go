@@ -61,17 +61,18 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 	var items []QueueItemDTO
 	summary := QueueSummaryDTO{}
 
+	// Support comma-separated statuses: e.g. "EXCEPTION,DUPLICATE,INSUFFICIENT_EVIDENCE"
+	allowedStatuses := map[string]bool{}
+	if filter.Status != "" {
+		for _, s := range strings.Split(filter.Status, ",") {
+			allowedStatuses[strings.ToUpper(strings.TrimSpace(s))] = true
+		}
+	}
+
 	for _, ev := range events {
 		billed := float64(ev.Invoice.BilledAmount)
 		expected := float64(ev.Pricing.ExpectedTotalCharge)
 		variance := float64(ev.Pricing.DifferenceAmount)
-
-		summary.TotalItems++
-		summary.TotalInvoicesCount++
-		summary.TotalBilledIDR += billed
-		summary.TotalInvoicedAmount += billed
-		summary.TotalVarianceIDR += variance
-		summary.TotalVarianceAmount += variance
 
 		topDiscrepancy := ""
 		severity := "LOW"
@@ -81,21 +82,9 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 		}
 
 		statusStr := string(ev.Reconciliation.Status)
-		if statusStr == "MATCH" {
-			summary.CleanMatchesCount++
-			summary.MatchesCount++
-		} else if statusStr == "EXCEPTION" {
-			summary.OpenExceptionsCount++
-			summary.UrgentDisputesCount++
-		} else {
-			summary.ResolvedCount++
-			if variance > 0 {
-				summary.LeakagePreventedIDR += variance
-			}
-		}
 
-		// Apply Filters
-		if filter.Status != "" && !strings.EqualFold(statusStr, filter.Status) {
+		// Apply Filters — supports comma-separated statuses
+		if len(allowedStatuses) > 0 && !allowedStatuses[strings.ToUpper(statusStr)] {
 			continue
 		}
 		if filter.Severity != "" && !strings.EqualFold(severity, filter.Severity) {
@@ -112,6 +101,28 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 				strings.Contains(strings.ToLower(ev.VendorID), query)
 			if !match {
 				continue
+			}
+		}
+
+		// Accumulate summary ONLY on items present in this filtered queue page
+		summary.TotalItems++
+		summary.TotalInvoicesCount++
+		summary.TotalBilledIDR += billed
+		summary.TotalInvoicedAmount += billed
+		summary.TotalVarianceIDR += variance
+		summary.TotalVarianceAmount += variance
+
+		switch statusStr {
+		case "MATCH":
+			summary.CleanMatchesCount++
+			summary.MatchesCount++
+		case "EXCEPTION", "DUPLICATE", "INSUFFICIENT_EVIDENCE":
+			summary.OpenExceptionsCount++
+			summary.UrgentDisputesCount++
+		default:
+			summary.ResolvedCount++
+			if variance > 0 {
+				summary.LeakagePreventedIDR += variance
 			}
 		}
 
@@ -187,7 +198,9 @@ func (r *Resource) GetDetail(ctx context.Context, id string) (*model.ShipmentEve
 	return r.db.GetEventByID(ctx, id)
 }
 
-// SubmitDecision records a human review decision and updates case status
+// SubmitDecision records a human review decision and updates case status.
+// SoD policy: ALL roles (including AP_MANAGER) approve directly to APPROVED.
+// Finance Controller final approval via FINAL_APPROVAL page also sets APPROVED.
 func (r *Resource) SubmitDecision(ctx context.Context, eventID string, req DecisionRequest) (*DecisionResponse, error) {
 	ev, err := r.db.GetEventByID(ctx, eventID)
 	if err != nil {
@@ -225,13 +238,14 @@ func (r *Resource) SubmitDecision(ctx context.Context, eventID string, req Decis
 	var newStatus string
 	switch action {
 	case "APPROVE":
+		// All roles: direct APPROVED (SOD enforced at page level, not status level)
 		newStatus = "APPROVED"
 	case "REJECT":
 		newStatus = "REJECTED"
 	case "DISPUTE":
 		newStatus = "DISPUTED"
 	case "OVERRIDE":
-		newStatus = "REVIEWED"
+		newStatus = "APPROVED"
 	default:
 		return nil, fmt.Errorf("unsupported decision action '%s'. Allowed: APPROVE, REJECT, DISPUTE, OVERRIDE", action)
 	}
@@ -241,7 +255,7 @@ func (r *Resource) SubmitDecision(ctx context.Context, eventID string, req Decis
 		Timestamp:      now,
 		Action:         action,
 		ActorID:        req.ReviewerID,
-		ActorRole:      req.Role,
+		ActorRole:      role,
 		PreviousStatus: prevStatus,
 		NewStatus:      newStatus,
 		Notes:          req.Reason,
@@ -260,6 +274,16 @@ func (r *Resource) SubmitDecision(ctx context.Context, eventID string, req Decis
 		AuditLogID:     model.NewUUID(),
 		Timestamp:      now,
 	}, nil
+}
+
+// GetVendors returns list of all active vendors from the DB
+func (r *Resource) GetVendors(ctx context.Context) ([]map[string]interface{}, error) {
+	return r.db.ListVendors(ctx)
+}
+
+// GetAllAuditLogs returns all audit events from the DB for the global audit ledger
+func (r *Resource) GetAllAuditLogs(ctx context.Context) ([]model.AuditTrailItem, error) {
+	return r.db.ListAuditLogs(ctx, "")
 }
 
 // GetDisputePackage generates an official dispute claim package citing contractual clauses

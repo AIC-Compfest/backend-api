@@ -53,21 +53,6 @@ func (r *Resource) GetQueue(query QueueQueryDTO) (QueueResponseDTO, error) {
 	var summary QueueSummaryDTO
 
 	for _, ev := range events {
-		summary.TotalInvoicesCount++
-		summary.TotalInvoicedAmount += ev.Invoice.BilledAmount
-
-		if ev.Reconciliation.Status == model.StatusMatch {
-			summary.MatchesCount++
-		} else {
-			summary.OpenExceptionsCount++
-			if ev.Pricing.DifferenceAmount > 0 {
-				summary.TotalVarianceAmount += ev.Pricing.DifferenceAmount
-			}
-			if ev.Reconciliation.DaysRemainingToDispute <= 7 {
-				summary.UrgentDisputesCount++
-			}
-		}
-
 		// Apply Filters
 		if query.StatusFilter != "" && query.StatusFilter != "ALL" && string(ev.Reconciliation.Status) != query.StatusFilter {
 			continue
@@ -82,6 +67,22 @@ func (r *Resource) GetQueue(query QueueQueryDTO) (QueueResponseDTO, error) {
 			vendor := strings.ToLower(ev.VendorID)
 			if !strings.Contains(invNo, q) && !strings.Contains(shpID, q) && !strings.Contains(vendor, q) {
 				continue
+			}
+		}
+
+		// Accumulate summary ONLY on items that match the filter
+		summary.TotalInvoicesCount++
+		summary.TotalInvoicedAmount += ev.Invoice.BilledAmount
+
+		if ev.Reconciliation.Status == model.StatusMatch {
+			summary.MatchesCount++
+		} else {
+			summary.OpenExceptionsCount++
+			if ev.Pricing.DifferenceAmount > 0 {
+				summary.TotalVarianceAmount += ev.Pricing.DifferenceAmount
+			}
+			if ev.Reconciliation.DaysRemainingToDispute <= 7 {
+				summary.UrgentDisputesCount++
 			}
 		}
 

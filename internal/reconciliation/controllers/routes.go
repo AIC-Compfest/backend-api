@@ -15,4 +15,10 @@ func RegisterRoutes(rg *gin.RouterGroup, res *reconciliation.Resource) {
 		group.POST("/:id/decision", Decision(res))
 		group.GET("/:id/dispute-package", DisputePackage(res))
 	}
+
+	// Vendors master data endpoint
+	rg.GET("/vendors", Vendors(res))
+
+	// Global audit trail endpoint
+	rg.GET("/audit/all", AuditAll(res))
 }
