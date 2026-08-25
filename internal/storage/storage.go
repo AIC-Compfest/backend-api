@@ -141,40 +141,64 @@ func (s *SupabaseStorage) Open(ctx context.Context, storagePath string) (io.Read
 	}
 
 	if s.supabaseURL == "" || s.serviceRoleKey == "" {
+		if s.fallbackLocal != nil {
+			return s.fallbackLocal.Open(ctx, storagePath)
+		}
 		return nil, fmt.Errorf("storage not configured")
 	}
 
-	cleanPath := strings.TrimPrefix(storagePath, "/")
-	if !strings.HasPrefix(cleanPath, "documents-original/") {
-		cleanPath = "documents-original/" + cleanPath
+	rawClean := strings.TrimPrefix(storagePath, "/")
+	candidatePaths := []string{rawClean}
+
+	if !strings.HasPrefix(rawClean, "documents-original/") && !strings.HasPrefix(rawClean, "documents/") {
+		candidatePaths = append([]string{"documents-original/" + rawClean, "documents/" + rawClean}, candidatePaths...)
+	} else if strings.HasPrefix(rawClean, "documents/") {
+		candidatePaths = append(candidatePaths, "documents-original/"+strings.TrimPrefix(rawClean, "documents/"))
+	} else if strings.HasPrefix(rawClean, "documents-original/") {
+		candidatePaths = append(candidatePaths, "documents/"+strings.TrimPrefix(rawClean, "documents-original/"))
 	}
 
-	url := fmt.Sprintf("%s/storage/v1/object/authenticated/%s", s.supabaseURL, cleanPath)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+s.serviceRoleKey)
-	req.Header.Set("apikey", s.serviceRoleKey)
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 300 {
-		resp.Body.Close()
-		altURL := fmt.Sprintf("%s/storage/v1/object/%s", s.supabaseURL, cleanPath)
-		altReq, altErr := http.NewRequestWithContext(ctx, http.MethodGet, altURL, nil)
-		if altErr == nil {
-			altReq.Header.Set("Authorization", "Bearer "+s.serviceRoleKey)
-			altReq.Header.Set("apikey", s.serviceRoleKey)
-			if altResp, err := s.httpClient.Do(altReq); err == nil && altResp.StatusCode < 300 {
-				return altResp.Body, nil
+	var lastErr error
+	for _, cPath := range candidatePaths {
+		// 1. Try authenticated storage object endpoint
+		authURL := fmt.Sprintf("%s/storage/v1/object/authenticated/%s", s.supabaseURL, cPath)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, authURL, nil)
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+s.serviceRoleKey)
+			req.Header.Set("apikey", s.serviceRoleKey)
+			if resp, err := s.httpClient.Do(req); err == nil {
+				if resp.StatusCode < 300 {
+					return resp.Body, nil
+				}
+				resp.Body.Close()
 			}
 		}
-		return nil, fmt.Errorf("failed to fetch from supabase storage: HTTP %d", resp.StatusCode)
+
+		// 2. Try standard object endpoint
+		stdURL := fmt.Sprintf("%s/storage/v1/object/%s", s.supabaseURL, cPath)
+		if req2, err := http.NewRequestWithContext(ctx, http.MethodGet, stdURL, nil); err == nil {
+			req2.Header.Set("Authorization", "Bearer "+s.serviceRoleKey)
+			req2.Header.Set("apikey", s.serviceRoleKey)
+			if resp2, err := s.httpClient.Do(req2); err == nil {
+				if resp2.StatusCode < 300 {
+					return resp2.Body, nil
+				}
+				resp2.Body.Close()
+				lastErr = fmt.Errorf("failed to fetch from supabase storage: HTTP %d", resp2.StatusCode)
+			}
+		}
 	}
-	return resp.Body, nil
+
+	if s.fallbackLocal != nil {
+		if rc, err := s.fallbackLocal.Open(ctx, storagePath); err == nil {
+			return rc, nil
+		}
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("document storage object not found in supabase or local cache")
 }
 
 func (s *SupabaseStorage) Delete(ctx context.Context, storagePath string) error {
