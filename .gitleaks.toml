@@ -1,0 +1,8 @@
+[allowlist]
+description = "Allowlist for test fixtures, mock data, and database seed scripts"
+paths = [
+    '''cmd/seed/main\.go''',
+    '''cmd/reset/main\.go''',
+    '''internal/.*_test\.go''',
+    '''internal/service/reconciliation/.*_test\.go''',
+]
