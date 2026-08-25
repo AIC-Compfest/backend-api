@@ -12,15 +12,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.25.x'
-      - run: go test ./...
-      - run: go vet ./...
-      - run: go build ./cmd/api ./cmd/worker
-      - name: Secret scan
+          go-version-file: 'go.mod'
+          check-latest: true
+      - name: Run Unit Tests
+        run: go test ./...
+      - name: Run Code Vet
+        run: go vet ./...
+      - name: Build Binaries
+        run: go build ./cmd/api ./cmd/worker
+      - name: Secret Scan
         uses: gitleaks/gitleaks-action@v2
         continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
