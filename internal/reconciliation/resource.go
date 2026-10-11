@@ -237,6 +237,27 @@ func (r *Resource) SubmitDecision(ctx context.Context, eventID string, req Decis
 
 	var newStatus string
 	switch action {
+	case "RELEASE":
+		if err := r.db.ReleaseEvent(ctx, eventID, req.ReviewerID, role, req.Reason); err != nil {
+			return nil, fmt.Errorf("failed to release event: %w", err)
+		}
+		now := time.Now().UTC()
+		return &DecisionResponse{
+			EventID:        eventID,
+			PreviousStatus: prevStatus,
+			NewStatus:      "RESOLVED",
+			Decision: model.AuditTrailItem{
+				Timestamp:      now,
+				Action:         "RELEASE",
+				ActorID:        req.ReviewerID,
+				ActorRole:      role,
+				PreviousStatus: prevStatus,
+				NewStatus:      "RESOLVED",
+				Notes:          req.Reason,
+			},
+			AuditLogID: model.NewUUID(),
+			Timestamp:  now,
+		}, nil
 	case "APPROVE":
 		// All roles: direct APPROVED (SOD enforced at page level, not status level)
 		newStatus = "APPROVED"
@@ -247,7 +268,7 @@ func (r *Resource) SubmitDecision(ctx context.Context, eventID string, req Decis
 	case "OVERRIDE":
 		newStatus = "APPROVED"
 	default:
-		return nil, fmt.Errorf("unsupported decision action '%s'. Allowed: APPROVE, REJECT, DISPUTE, OVERRIDE", action)
+		return nil, fmt.Errorf("unsupported decision action '%s'. Allowed: APPROVE, REJECT, DISPUTE, OVERRIDE, RELEASE", action)
 	}
 
 	now := time.Now().UTC()

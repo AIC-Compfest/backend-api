@@ -346,7 +346,9 @@ func (r *ResourceDB) SeedFromPilotDataset(datasetDir string) error {
 	return nil
 }
 
-// SaveEvent persists a shipment event into Supabase DB and cache, ensuring vendor is registered
+// SaveEvent persists a shipment event into Supabase DB and cache, ensuring vendor is registered.
+// It also links FK domain tables (invoice_id, surat_jalan_id, pod_id, rate_agreement_id)
+// and auto-creates a reconciliation_case if one doesn't exist.
 func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) error {
 	if event == nil || event.EventID == "" {
 		return fmt.Errorf("invalid shipment event payload")
@@ -361,40 +363,171 @@ func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) 
 	}
 
 	if r.dbClient != nil {
-		var created []map[string]interface{}
-		payload := map[string]interface{}{
-			"id":                     event.EventID,
-			"event_id":               event.EventID,
-			"shipment_id":            event.ShipmentID,
-			"vendor_id":              event.VendorID,
-			"status":                 string(event.Reconciliation.Status),
-			"match_confidence":       event.MatchConfidence,
-			"expected_base_charge":   event.Pricing.ExpectedBaseCharge,
-			"expected_fuel_surcharge": event.Pricing.ExpectedFuelSurcharge,
-			"expected_total_charge":  event.Pricing.ExpectedTotalCharge,
-			"billed_total_charge":    event.Invoice.BilledAmount,
-			"difference_amount":      event.Pricing.DifferenceAmount,
-			"is_material":            event.Pricing.IsMaterial,
-			"calculation_trace":      event.Pricing.Trace.TraceLog,
-			"priority_score":         event.Reconciliation.PriorityScore,
-			"requires_human_review":  event.Reconciliation.RequiresHumanReview,
+		// Resolve FK: invoice_id
+		var invoiceID, suratJalanID, podID, rateAgreementID, docID interface{}
+
+		if event.Invoice.ShipmentID != "" || event.ShipmentID != "" {
+			shpKey := event.Invoice.ShipmentID
+			if shpKey == "" {
+				shpKey = event.ShipmentID
+			}
+			var invRows []map[string]interface{}
+			pInv := url.Values{}
+			pInv.Set("shipment_id", "eq."+shpKey)
+			pInv.Set("limit", "1")
+			if err := r.dbClient.Query(ctx, "invoices", pInv, &invRows); err == nil && len(invRows) > 0 {
+				if v, ok := invRows[0]["id"].(string); ok && v != "" {
+					invoiceID = v
+				}
+				if v, ok := invRows[0]["document_id"].(string); ok && v != "" {
+					docID = v
+					if event.Invoice.DocumentID == "" {
+						event.Invoice.DocumentID = v
+					}
+				}
+			}
+
+			// Resolve FK: surat_jalan_id
+			var sjRows []map[string]interface{}
+			pSJ := url.Values{}
+			pSJ.Set("shipment_id", "eq."+shpKey)
+			pSJ.Set("limit", "1")
+			if err := r.dbClient.Query(ctx, "surat_jalans", pSJ, &sjRows); err == nil && len(sjRows) > 0 {
+				if v, ok := sjRows[0]["id"].(string); ok && v != "" {
+					suratJalanID = v
+				}
+			}
+
+			// Resolve FK: pod_id
+			var podRows []map[string]interface{}
+			pPOD := url.Values{}
+			pPOD.Set("shipment_id", "eq."+shpKey)
+			pPOD.Set("limit", "1")
+			if err := r.dbClient.Query(ctx, "pods", pPOD, &podRows); err == nil && len(podRows) > 0 {
+				if v, ok := podRows[0]["id"].(string); ok && v != "" {
+					podID = v
+				}
+			}
 		}
+
+		// Resolve FK: rate_agreement_id by vendor_id
+		if event.VendorID != "" {
+			var raRows []map[string]interface{}
+			pRA := url.Values{}
+			pRA.Set("vendor_id", "eq."+event.VendorID)
+			pRA.Set("order", "created_at.desc")
+			pRA.Set("limit", "1")
+			if err := r.dbClient.Query(ctx, "rate_agreements", pRA, &raRows); err == nil && len(raRows) > 0 {
+				if v, ok := raRows[0]["id"].(string); ok && v != "" {
+					rateAgreementID = v
+				}
+			}
+		}
+
+		payload := map[string]interface{}{
+			"id":                      event.EventID,
+			"event_id":                event.EventID,
+			"shipment_id":             event.ShipmentID,
+			"vendor_id":               event.VendorID,
+			"status":                  string(event.Reconciliation.Status),
+			"match_confidence":        event.MatchConfidence,
+			"expected_base_charge":    event.Pricing.ExpectedBaseCharge,
+			"expected_fuel_surcharge": event.Pricing.ExpectedFuelSurcharge,
+			"expected_total_charge":   event.Pricing.ExpectedTotalCharge,
+			"billed_total_charge":     event.Invoice.BilledAmount,
+			"difference_amount":       event.Pricing.DifferenceAmount,
+			"is_material":             event.Pricing.IsMaterial,
+			"calculation_trace":       event.Pricing.Trace.TraceLog,
+			"priority_score":          event.Reconciliation.PriorityScore,
+			"requires_human_review":   event.Reconciliation.RequiresHumanReview,
+			"invoice_id":              invoiceID,
+			"surat_jalan_id":          suratJalanID,
+			"pod_id":                  podID,
+			"rate_agreement_id":       rateAgreementID,
+			"document_id":             docID,
+		}
+
 		pEv := url.Values{}
 		pEv.Set("event_id", "eq."+event.EventID)
 		var existEv []map[string]interface{}
 		_ = r.dbClient.Query(ctx, "shipment_events", pEv, &existEv)
+		var savedEventID string
 		if len(existEv) > 0 {
 			var uOut []map[string]interface{}
 			_ = r.dbClient.Update(ctx, "shipment_events", pEv, payload, &uOut)
+			if v, ok := existEv[0]["id"].(string); ok {
+				savedEventID = v
+			}
 		} else {
+			var created []map[string]interface{}
 			_ = r.dbClient.Insert(ctx, "shipment_events", payload, &created)
+			if len(created) > 0 {
+				if v, ok := created[0]["id"].(string); ok {
+					savedEventID = v
+				}
+			}
+			if savedEventID == "" {
+				savedEventID = event.EventID
+			}
 		}
+
+		// Auto-create reconciliation_case jika belum ada
+		r.EnsureReconciliationCase(ctx, savedEventID, event)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events[event.EventID] = event
 	return nil
+}
+
+// EnsureReconciliationCase auto-creates a reconciliation_case if one does not exist for this event.
+func (r *ResourceDB) EnsureReconciliationCase(ctx context.Context, eventUUID string, event *model.ShipmentEvent) {
+	if r.dbClient == nil || eventUUID == "" || event == nil {
+		return
+	}
+
+	// Check if case already exists
+	var existing []map[string]interface{}
+	pCheck := url.Values{}
+	pCheck.Set("event_id", "eq."+eventUUID)
+	pCheck.Set("limit", "1")
+	if err := r.dbClient.Query(ctx, "reconciliation_cases", pCheck, &existing); err == nil && len(existing) > 0 {
+		return // Case already exists
+	}
+
+	caseStatus := "OPEN"
+	switch event.Reconciliation.Status {
+	case model.StatusMatch:
+		caseStatus = "RESOLVED"
+	case model.StatusApproved:
+		caseStatus = "APPROVED"
+	case model.StatusRejected:
+		caseStatus = "REJECTED"
+	case model.StatusDisputed:
+		caseStatus = "DISPUTED"
+	case model.StatusResolved:
+		caseStatus = "RESOLVED"
+	}
+
+	now := time.Now().UTC()
+	casePayload := map[string]interface{}{
+		"id":                     model.NewUUID(),
+		"case_id":                "CASE-" + strings.ToUpper(eventUUID[:8]),
+		"event_id":               eventUUID,
+		"vendor_id":              event.VendorID,
+		"status":                 caseStatus,
+		"priority_score":         event.Reconciliation.PriorityScore,
+		"financial_exposure_idr": event.Pricing.DifferenceAmount,
+		"created_at":             now,
+		"updated_at":             now,
+	}
+	var cOut []map[string]interface{}
+	if err := r.dbClient.Insert(ctx, "reconciliation_cases", casePayload, &cOut); err != nil {
+		fmt.Printf("[ReconciliationCase] Failed to auto-create case for event %s: %v\n", eventUUID, err)
+	} else {
+		fmt.Printf("[ReconciliationCase] Auto-created case for event %s (status=%s)\n", eventUUID, caseStatus)
+	}
 }
 
 // rowToShipmentEvent converts a Supabase shipment_events row to model.ShipmentEvent with domain table lookups
@@ -759,39 +892,105 @@ func (r *ResourceDB) ListAllEvents(ctx context.Context) ([]*model.ShipmentEvent,
 	return list, nil
 }
 
-// SaveDecision stores a reviewer decision and records immutable audit log
+// SaveDecision stores a reviewer decision and records immutable audit log.
+// Also syncs status ke reconciliation_cases.
 func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision model.AuditTrailItem, previousStatus string, newStatus string) (*model.AuditTrailItem, error) {
 	now := time.Now().UTC()
 	decision.Timestamp = now
 
 	// Persist to Supabase audit_events and review_decisions
 	if r.dbClient != nil {
-		decisionPayload := map[string]interface{}{
-			"id":          model.NewUUID(),
-			"event_id":    eventID,
-			"reviewer_id": decision.ActorID,
-			"decision":    decision.Action,
-			"reason":      decision.Notes,
-			"created_at":  now,
-		}
-		var dOut []map[string]interface{}
-		_ = r.dbClient.Insert(ctx, "review_decisions", decisionPayload, &dOut)
-
-		// Update status in Supabase shipment_events
+		// Resolve UUID dari event (bisa berupa event_id string atau UUID)
+		var eventUUID string
 		params := url.Values{}
 		params.Set("or", fmt.Sprintf("(id.eq.%s,event_id.eq.%s,shipment_id.eq.%s)", eventID, eventID, eventID))
+		params.Set("limit", "1")
+		var seRows []map[string]interface{}
+		if err := r.dbClient.Query(ctx, "shipment_events", params, &seRows); err == nil && len(seRows) > 0 {
+			if v, ok := seRows[0]["id"].(string); ok {
+				eventUUID = v
+			}
+		}
+		if eventUUID == "" {
+			eventUUID = eventID
+		}
+
+		// Map action ke nilai yang valid di DB constraint
+		dbAction := strings.ToUpper(decision.Action)
+		switch dbAction {
+		case "APPROVE":
+			dbAction = "APPROVE"
+		case "REJECT":
+			dbAction = "REJECT"
+		case "DISPUTE":
+			dbAction = "DISPUTE"
+		case "RELEASE":
+			dbAction = "RELEASE"
+		default:
+			dbAction = "APPROVE"
+		}
+
+		decisionPayload := map[string]interface{}{
+			"id":           model.NewUUID(),
+			"case_id":      nil, // diisi jika ada reconciliation_case
+			"action":       dbAction,
+			"reviewer_id":  decision.ActorID,
+			"reviewer_role": decision.ActorRole,
+			"reason":       decision.Notes,
+			"created_at":   now,
+		}
+
+		// Cari case_id yang terkait
+		var rcRows []map[string]interface{}
+		pRC := url.Values{}
+		pRC.Set("event_id", "eq."+eventUUID)
+		pRC.Set("limit", "1")
+		if err := r.dbClient.Query(ctx, "reconciliation_cases", pRC, &rcRows); err == nil && len(rcRows) > 0 {
+			if caseUUID, ok := rcRows[0]["id"].(string); ok && caseUUID != "" {
+				decisionPayload["case_id"] = caseUUID
+
+				// Sync status reconciliation_case
+				caseStatus := "IN_REVIEW"
+				switch newStatus {
+				case "APPROVED":
+					caseStatus = "APPROVED"
+				case "REJECTED":
+					caseStatus = "REJECTED"
+				case "DISPUTED":
+					caseStatus = "DISPUTED"
+				case "RESOLVED":
+					caseStatus = "RESOLVED"
+				}
+				rcUpdate := url.Values{}
+				rcUpdate.Set("id", "eq."+caseUUID)
+				var rcOut []map[string]interface{}
+				_ = r.dbClient.Update(ctx, "reconciliation_cases", rcUpdate, map[string]interface{}{
+					"status":     caseStatus,
+					"updated_at": now,
+				}, &rcOut)
+			}
+		}
+
+		var dOut []map[string]interface{}
+		if err := r.dbClient.Insert(ctx, "review_decisions", decisionPayload, &dOut); err != nil {
+			fmt.Printf("[SaveDecision] Failed to insert review_decisions: %v\n", err)
+		}
+
+		// Update status in Supabase shipment_events
+		seParams := url.Values{}
+		seParams.Set("or", fmt.Sprintf("(id.eq.%s,event_id.eq.%s,shipment_id.eq.%s)", eventID, eventID, eventID))
 		updatePayload := map[string]interface{}{
 			"status":                newStatus,
 			"requires_human_review": false,
 		}
 		var uOut []map[string]interface{}
-		if err := r.dbClient.Update(ctx, "shipment_events", params, updatePayload, &uOut); err != nil {
+		if err := r.dbClient.Update(ctx, "shipment_events", seParams, updatePayload, &uOut); err != nil {
 			fmt.Printf("[Supabase Update Error] Failed to update shipment_events status: %v\n", err)
 		} else {
 			fmt.Printf("[Supabase Update Success] Updated shipment_events for %s to %s\n", eventID, newStatus)
 		}
 
-		// Sync status_approval to documents table in Supabase
+		// Sync status_approval ke documents table
 		docApproval := "UNDER_REVIEW"
 		switch newStatus {
 		case "APPROVED", "RESOLVED", "MATCH":
@@ -811,21 +1010,24 @@ func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision 
 			}, &docOut)
 		}
 
+		// Write to audit_events (append-only immutable ledger)
 		auditPayload := map[string]interface{}{
-
-			"id":           model.NewUUID(),
-			"event_id":     eventID,
-			"actor_id":     decision.ActorID,
-			"action":       decision.Action,
-			"entity_type":  "RECONCILIATION_CASE",
-			"entity_id":    eventID,
-			"before_state": map[string]interface{}{"status": previousStatus},
-			"after_state":  map[string]interface{}{"status": newStatus, "notes": decision.Notes},
-			"reason":       decision.Notes,
-			"created_at":   now,
+			"id":             model.NewUUID(),
+			"event_id":       eventUUID,
+			"actor_id":       decision.ActorID,
+			"actor_role":     decision.ActorRole,
+			"action":         decision.Action,
+			"previous_status": previousStatus,
+			"new_status":     newStatus,
+			"notes":          decision.Notes,
+			"timestamp":      now,
 		}
 		var aOut []map[string]interface{}
-		_ = r.dbClient.Insert(ctx, "audit_events", auditPayload, &aOut)
+		if err := r.dbClient.Insert(ctx, "audit_events", auditPayload, &aOut); err != nil {
+			fmt.Printf("[AuditEvent] Failed to write audit_events: %v\n", err)
+		} else {
+			fmt.Printf("[AuditEvent] Recorded audit event for %s: %s → %s\n", eventID, previousStatus, newStatus)
+		}
 	}
 
 	r.mu.Lock()
@@ -839,6 +1041,145 @@ func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision 
 
 	r.audit = append(r.audit, decision)
 	return &decision, nil
+}
+
+// ReleaseEvent moves an approved/rejected event to the immutable audit_ledger
+// and marks it as RESOLVED. This is the final action by Finance Controller (SoD).
+// After release, the event disappears from the SoD queue and appears in Audit Ledger Trail.
+func (r *ResourceDB) ReleaseEvent(ctx context.Context, eventID string, releasedBy, releasedByRole, notes string) error {
+	if r.dbClient == nil {
+		return fmt.Errorf("database client not available")
+	}
+
+	// Resolve event from DB
+	params := url.Values{}
+	params.Set("or", fmt.Sprintf("(id.eq.%s,event_id.eq.%s,shipment_id.eq.%s)", eventID, eventID, eventID))
+	params.Set("limit", "1")
+	var seRows []map[string]interface{}
+	if err := r.dbClient.Query(ctx, "shipment_events", params, &seRows); err != nil || len(seRows) == 0 {
+		return fmt.Errorf("shipment event '%s' not found for release", eventID)
+	}
+	row := seRows[0]
+
+	eventUUID, _ := row["id"].(string)
+	shipmentID, _ := row["shipment_id"].(string)
+	vendorID, _ := row["vendor_id"].(string)
+	statusStr, _ := row["status"].(string)
+	billedVal, _ := row["billed_total_charge"].(float64)
+	expectedVal, _ := row["expected_total_charge"].(float64)
+	diffVal, _ := row["difference_amount"].(float64)
+
+	// Only allow RELEASE if status is APPROVED or REJECTED
+	if statusStr != "APPROVED" && statusStr != "REJECTED" && statusStr != "DISPUTED" {
+		return fmt.Errorf("event '%s' has status '%s' — only APPROVED/REJECTED/DISPUTED can be released", eventID, statusStr)
+	}
+
+	// Prevent double-release
+	var existLedger []map[string]interface{}
+	pLedger := url.Values{}
+	pLedger.Set("event_id", "eq."+eventUUID)
+	pLedger.Set("limit", "1")
+	if err := r.dbClient.Query(ctx, "audit_ledger", pLedger, &existLedger); err == nil && len(existLedger) > 0 {
+		return fmt.Errorf("event '%s' already released to audit_ledger", eventID)
+	}
+
+	// Resolve vendor name and invoice number
+	vendorName := r.GetVendorName(ctx, vendorID)
+	invoiceNumber := shipmentID
+	if ev, ok := r.events[eventID]; ok && ev.Invoice.InvoiceNumber != "" {
+		invoiceNumber = ev.Invoice.InvoiceNumber
+	}
+
+	// Determine final_decision for ledger
+	finalDecision := "APPROVED"
+	if statusStr == "REJECTED" {
+		finalDecision = "REJECTED"
+	} else if statusStr == "DISPUTED" {
+		finalDecision = "DISPUTED_RESOLVED"
+	}
+
+	// Get reconciliation_case_id if exists
+	var caseUUID interface{}
+	var rcRows []map[string]interface{}
+	pRC := url.Values{}
+	pRC.Set("event_id", "eq."+eventUUID)
+	pRC.Set("limit", "1")
+	if err := r.dbClient.Query(ctx, "reconciliation_cases", pRC, &rcRows); err == nil && len(rcRows) > 0 {
+		if v, ok := rcRows[0]["id"].(string); ok {
+			caseUUID = v
+		}
+	}
+
+	now := time.Now().UTC()
+
+	// Insert into audit_ledger (immutable)
+	ledgerPayload := map[string]interface{}{
+		"id":                      model.NewUUID(),
+		"event_id":                eventUUID,
+		"reconciliation_case_id": caseUUID,
+		"shipment_id":             shipmentID,
+		"invoice_number":          invoiceNumber,
+		"vendor_id":               vendorID,
+		"vendor_name":             vendorName,
+		"billed_amount":           billedVal,
+		"expected_amount":         expectedVal,
+		"variance_amount":         diffVal,
+		"final_decision":          finalDecision,
+		"released_by":             releasedBy,
+		"released_by_role":        releasedByRole,
+		"released_at":             now,
+		"reviewer_notes":          notes,
+		"discrepancy_summary":     "[]",
+		"created_at":              now,
+	}
+	var ledgerOut []map[string]interface{}
+	if err := r.dbClient.Insert(ctx, "audit_ledger", ledgerPayload, &ledgerOut); err != nil {
+		return fmt.Errorf("failed to insert into audit_ledger: %v", err)
+	}
+	fmt.Printf("[AuditLedger] Released event %s to audit_ledger (decision=%s)\n", eventID, finalDecision)
+
+	// Mark event as RESOLVED in shipment_events
+	seParams := url.Values{}
+	seParams.Set("or", fmt.Sprintf("(id.eq.%s,event_id.eq.%s)", eventUUID, eventUUID))
+	var seOut []map[string]interface{}
+	_ = r.dbClient.Update(ctx, "shipment_events", seParams, map[string]interface{}{
+		"status": "RESOLVED",
+	}, &seOut)
+
+	// Mark reconciliation_case as RESOLVED
+	if caseUUID != nil {
+		rcParams := url.Values{}
+		rcParams.Set("id", "eq."+caseUUID.(string))
+		var rcOut []map[string]interface{}
+		_ = r.dbClient.Update(ctx, "reconciliation_cases", rcParams, map[string]interface{}{
+			"status":     "RESOLVED",
+			"updated_at": now,
+		}, &rcOut)
+	}
+
+	// Write to audit_events
+	auditPayload := map[string]interface{}{
+		"id":              model.NewUUID(),
+		"event_id":        eventUUID,
+		"actor_id":        releasedBy,
+		"actor_role":      releasedByRole,
+		"action":          "RELEASE",
+		"previous_status": statusStr,
+		"new_status":      "RESOLVED",
+		"notes":           notes,
+		"timestamp":       now,
+	}
+	var aOut []map[string]interface{}
+	_ = r.dbClient.Insert(ctx, "audit_events", auditPayload, &aOut)
+
+	// Update in-memory cache
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ev, exists := r.events[eventID]; exists {
+		ev.Reconciliation.Status = model.StatusResolved
+	}
+
+	return nil
 }
 
 // ListAuditLogs retrieves all audit trail logs from Supabase
@@ -869,11 +1210,18 @@ func (r *ResourceDB) ListAuditLogs(ctx context.Context, eventID string) ([]model
 				if ts.IsZero() {
 					ts = time.Now().UTC()
 				}
+				actorRole, _ := row["actor_role"].(string)
+				prevStatus, _ := row["previous_status"].(string)
+				newStatus, _ := row["new_status"].(string)
+
 				items = append(items, model.AuditTrailItem{
-					ActorID:   actorID,
-					Action:    action,
-					Timestamp: ts,
-					Notes:     reason,
+					ActorID:        actorID,
+					ActorRole:      actorRole,
+					Action:         action,
+					PreviousStatus: prevStatus,
+					NewStatus:      newStatus,
+					Timestamp:      ts,
+					Notes:          reason,
 				})
 			}
 			return items, nil

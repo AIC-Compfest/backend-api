@@ -8,5 +8,4 @@ tmp/
 storage/
 reports/
 docs/
-*.md
 *.exe

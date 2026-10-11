@@ -358,8 +358,8 @@ func (s *ReviewService) SubmitDecision(eventID string, req DecisionRequest) (*mo
 	}
 
 	action := strings.ToUpper(strings.TrimSpace(req.Action))
-	if action != "APPROVE" && action != "DISPUTE" && action != "REJECT" {
-		return nil, fmt.Errorf("invalid action '%s'. Allowed: APPROVE, DISPUTE, REJECT", req.Action)
+	if action != "APPROVE" && action != "DISPUTE" && action != "REJECT" && action != "RELEASE" {
+		return nil, fmt.Errorf("invalid action '%s'. Allowed: APPROVE, DISPUTE, REJECT, RELEASE", req.Action)
 	}
 
 	if (action == "DISPUTE" || action == "REJECT") && strings.TrimSpace(req.Reason) == "" {
@@ -390,6 +390,10 @@ func (s *ReviewService) SubmitDecision(eventID string, req DecisionRequest) (*mo
 	var newStatus string
 
 	switch action {
+	case "RELEASE":
+		newStatus = string(model.StatusResolved)
+		ev.Reconciliation.Status = model.StatusResolved
+		ev.Reconciliation.RequiresHumanReview = false
 	case "APPROVE":
 		newStatus = string(model.StatusApproved)
 		ev.Reconciliation.Status = model.StatusApproved
