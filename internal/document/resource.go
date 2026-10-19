@@ -15,12 +15,10 @@ import (
 	"strings"
 	"time"
 
-
 	"backend-api/internal/model"
 	serviceRecon "backend-api/internal/service/reconciliation"
 	"backend-api/internal/storage"
 )
-
 
 var AllowedExtensions = map[string]string{
 	".pdf":  "application/pdf",
@@ -38,11 +36,13 @@ type EventSink interface {
 
 // AIExtractedField represents one extracted key-value pair from AI Pipeline
 type AIExtractedField struct {
-	Field      string               `json:"field"`
-	Value      interface{}          `json:"value"`
-	Confidence float64              `json:"confidence"`
-	Source     model.EvidenceSource `json:"source,omitempty"`
-	Method     string               `json:"method,omitempty"`
+	Field            string               `json:"field"`
+	Value            interface{}          `json:"value"`
+	Confidence       float64              `json:"confidence"`
+	ConfidenceSource string               `json:"confidence_source,omitempty"`
+	Source           model.EvidenceSource `json:"source,omitempty"`
+	Method           string               `json:"method,omitempty"`
+	IsUnknown        bool                 `json:"is_unknown"`
 }
 
 // AIPageResult represents per-page understanding emitted by Phase 5 AI Pipeline
@@ -52,6 +52,32 @@ type AIPageResult struct {
 	SignatureDetection map[string]any         `json:"signature_detection"`
 	LineCount          int                    `json:"line_count"`
 	Quality            map[string]interface{} `json:"quality"`
+	EngineUsed         string                 `json:"engine_used,omitempty"`
+	FallbackUsed       bool                   `json:"fallback_used,omitempty"`
+	PageImage          AIPageImage            `json:"page_image,omitempty"`
+	CoordSpace         string                 `json:"coord_space,omitempty"`
+}
+
+// AIPageImage describes the canonical page raster that AI bboxes are normalized against.
+type AIPageImage struct {
+	Width           int     `json:"width"`
+	Height          int     `json:"height"`
+	DPI             float64 `json:"dpi"`
+	RotationApplied int     `json:"rotation_applied"`
+}
+
+// pageGeometry returns pixel size and point size for a page, falling back to A4 only
+// when the AI service did not report geometry.
+func pageGeometry(p AIPageResult) (w, h int, wPts, hPts float64) {
+	if p.PageImage.Width > 0 && p.PageImage.Height > 0 {
+		w, h = p.PageImage.Width, p.PageImage.Height
+		dpi := p.PageImage.DPI
+		if dpi <= 0 {
+			dpi = 72
+		}
+		return w, h, float64(w) * 72 / dpi, float64(h) * 72 / dpi
+	}
+	return 595, 842, 595.0, 842.0
 }
 
 // AISegmentResult represents a logical document segment emitted by Phase 5/6 AI Pipeline
@@ -90,6 +116,13 @@ type AIExtractionResult struct {
 	RawExtractedFields    json.RawMessage               `json:"extracted_fields"`
 	ExtractedFields       []AIExtractedField            `json:"-"`
 	LogicalExtractions    map[string][]AIExtractedField `json:"-"`
+	TableGroups           []map[string]any              `json:"table_groups,omitempty"`
+	MLExtraction          map[string]any                `json:"ml_extraction,omitempty"`
+	ArithmeticValidation  map[string]any                `json:"arithmetic_validation,omitempty"`
+	UnknownFields         []string                      `json:"unknown_fields,omitempty"`
+	RequiresHumanReview   bool                          `json:"requires_human_review"`
+	ExtractionAttempted   bool                          `json:"extraction_attempted"`
+	PipelineVersion       string                        `json:"pipeline_version,omitempty"`
 	ErrorCode             string                        `json:"error_code"`
 }
 
@@ -98,6 +131,8 @@ type Resource struct {
 	db           *ResourceDB
 	storage      storage.Storage
 	aiServiceURL string
+	aiHTTPClient *http.Client
+	aiTimeout    time.Duration
 	eventSink    EventSink
 }
 
@@ -107,6 +142,8 @@ func NewResource(db *ResourceDB, store storage.Storage) *Resource {
 		db:           db,
 		storage:      store,
 		aiServiceURL: "http://localhost:8100",
+		aiHTTPClient: &http.Client{Timeout: 120 * time.Second},
+		aiTimeout:    120 * time.Second,
 	}
 }
 
@@ -120,12 +157,32 @@ func (r *Resource) SetAIServiceURL(url string) {
 	r.aiServiceURL = strings.TrimRight(url, "/")
 }
 
+// SetAIServiceTimeout configures the upper bound for one AI extraction request.
+// PDF OCR can take longer than the old 35-second default; callers should still
+// pass a request context so cancellation propagates to the AI service.
+func (r *Resource) SetAIServiceTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	r.aiTimeout = timeout
+	if r.aiHTTPClient == nil {
+		r.aiHTTPClient = &http.Client{}
+	}
+	r.aiHTTPClient.Timeout = timeout
+}
+
 const MaxDocumentSizeBytes = 10 * 1024 * 1024 // 10 MB
 
 // extractViaAI calls Python FastAPI AI pipeline for deep OCR + structured extraction
 func (r *Resource) extractViaAI(ctx context.Context, filename string, fileBytes []byte) (*AIExtractionResult, error) {
 	if r.aiServiceURL == "" {
 		r.aiServiceURL = "http://localhost:8100"
+	}
+	if r.aiHTTPClient == nil {
+		r.SetAIServiceTimeout(r.aiTimeout)
+	}
+	if r.aiTimeout <= 0 {
+		r.SetAIServiceTimeout(120 * time.Second)
 	}
 
 	body := &bytes.Buffer{}
@@ -147,21 +204,29 @@ func (r *Resource) extractViaAI(ctx context.Context, filename string, fileBytes 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	// The hash is stable for retries and lets ai-service correlate logs without
+	// making it responsible for business persistence or idempotency.
+	req.Header.Set("X-Correlation-ID", fmt.Sprintf("sha256:%x", sha256.Sum256(fileBytes)))
 
-	client := &http.Client{Timeout: 35 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := r.aiHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		respBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ai service error %d: %s", resp.StatusCode, string(respBytes))
+		respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+		return nil, fmt.Errorf("ai service contract request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
 	}
 
 	var result AIExtractionResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode ai-service pipeline/full response: %w", err)
+	}
+	if result.Status == "" {
+		return nil, fmt.Errorf("decode ai-service pipeline/full response: missing status")
+	}
+	if err := validateAIResult(&result); err != nil {
 		return nil, err
 	}
 
@@ -378,16 +443,17 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 				pageSegID = createdSegments[0].ID
 			}
 
+			pw, ph, pwPts, phPts := pageGeometry(p)
 			pageRecord := DocumentPage{
 				ID:             model.NewUUID(),
 				DocumentID:     doc.ID,
 				PageNumber:     p.PageNumber,
-				Width:          595,
-				Height:         842,
-				PageWidthPts:   595.0,
-				PageHeightPts:  842.0,
+				Width:          pw,
+				Height:         ph,
+				PageWidthPts:   pwPts,
+				PageHeightPts:  phPts,
 				OCRConfidence:  pConf,
-				OCREngineUsed:  "pymupdf_vector",
+				OCREngineUsed:  pageEngineUsed(aiResult, p),
 				SegmentID:      pageSegID,
 				OCRCompletedAt: &now,
 				CreatedAt:      now,
@@ -409,7 +475,7 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 			PageWidthPts:   595.0,
 			PageHeightPts:  842.0,
 			OCRConfidence:  initialConf,
-			OCREngineUsed:  "pymupdf_vector",
+			OCREngineUsed:  pageEngineUsed(aiResult, AIPageResult{PageNumber: 1}),
 			SegmentID:      pageSegID,
 			OCRCompletedAt: &now,
 			CreatedAt:      now,
@@ -421,111 +487,8 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 	// Save extraction record to document_extractions table in Supabase
 	_ = r.db.InsertExtraction(ctx, doc.ID, extractedFieldsMap, initialConf)
 
-	// Persist field_evidence rows with OCR bounding boxes (PRD §18, Migration 008)
-	defaultSegID := doc.ID
-	if len(createdSegments) > 0 {
-		defaultSegID = createdSegments[0].ID
-	}
-
-	if aiResult != nil {
-		// 1. From LogicalExtractions (Multi-page logical doc groups)
-		if len(aiResult.LogicalExtractions) > 0 {
-			for docType, fields := range aiResult.LogicalExtractions {
-				segID := defaultSegID
-				for _, cs := range createdSegments {
-					if cs.DocumentType == docType {
-						segID = cs.ID
-						break
-					}
-				}
-				for _, f := range fields {
-					page := f.Source.Page
-					if page <= 0 {
-						page = 1
-					}
-					fePayload := map[string]interface{}{
-						"id":               model.NewUUID(),
-						"document_id":      doc.ID,
-						"segment_id":       segID,
-						"page_number":      page,
-						"field_name":       f.Field,
-						"field_value":      fmt.Sprintf("%v", f.Value),
-						"confidence":       f.Confidence,
-						"coordinate_space": "normalized_01",
-						"created_at":       now,
-					}
-					if f.Source.BBox != nil {
-						fePayload["bbox_x1"] = f.Source.BBox.X1
-						fePayload["bbox_y1"] = f.Source.BBox.Y1
-						fePayload["bbox_x2"] = f.Source.BBox.X2
-						fePayload["bbox_y2"] = f.Source.BBox.Y2
-					}
-					_ = r.db.InsertFieldEvidence(ctx, fePayload)
-				}
-			}
-		}
-
-		// 2. From SegmentExtractions
-		for _, se := range aiResult.SegmentExtractions {
-			segID := defaultSegID
-			for _, cs := range createdSegments {
-				if cs.SegmentNumber == se.SegmentNumber {
-					segID = cs.ID
-					break
-				}
-			}
-			for _, f := range se.ExtractedFields {
-				page := f.Source.Page
-				if page <= 0 {
-					page = 1
-				}
-				fePayload := map[string]interface{}{
-					"id":               model.NewUUID(),
-					"document_id":      doc.ID,
-					"segment_id":       segID,
-					"page_number":      page,
-					"field_name":       f.Field,
-					"field_value":      fmt.Sprintf("%v", f.Value),
-					"confidence":       f.Confidence,
-					"coordinate_space": "normalized_01",
-					"created_at":       now,
-				}
-				if f.Source.BBox != nil {
-					fePayload["bbox_x1"] = f.Source.BBox.X1
-					fePayload["bbox_y1"] = f.Source.BBox.Y1
-					fePayload["bbox_x2"] = f.Source.BBox.X2
-					fePayload["bbox_y2"] = f.Source.BBox.Y2
-				}
-				_ = r.db.InsertFieldEvidence(ctx, fePayload)
-			}
-		}
-
-		// 3. From general ExtractedFields
-		for _, f := range aiResult.ExtractedFields {
-			page := f.Source.Page
-			if page <= 0 {
-				page = 1
-			}
-			fePayload := map[string]interface{}{
-				"id":               model.NewUUID(),
-				"document_id":      doc.ID,
-				"segment_id":       defaultSegID,
-				"page_number":      page,
-				"field_name":       f.Field,
-				"field_value":      fmt.Sprintf("%v", f.Value),
-				"confidence":       f.Confidence,
-				"coordinate_space": "normalized_01",
-				"created_at":       now,
-			}
-			if f.Source.BBox != nil {
-				fePayload["bbox_x1"] = f.Source.BBox.X1
-				fePayload["bbox_y1"] = f.Source.BBox.Y1
-				fePayload["bbox_x2"] = f.Source.BBox.X2
-				fePayload["bbox_y2"] = f.Source.BBox.Y2
-			}
-			_ = r.db.InsertFieldEvidence(ctx, fePayload)
-		}
-	}
+	// Persist field_evidence rows with OCR bounding boxes (PRD 18, Migration 008)
+	r.persistFieldEvidence(ctx, doc.ID, createdSegments, aiResult, now)
 
 	// Extract real canonical entities from AI extraction results
 	invCanon, sjCanon, podCanon, ctrCanon := extractCanonicalEntities(doc.ID, hashStr, fileHeader.Filename, aiResult, extractedFieldsMap, now)
@@ -618,7 +581,6 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		})
 	}
 
-
 	var reconEventID string
 
 	// Automatically Run 4-Way Matching & Register Reconciliation Event
@@ -640,7 +602,6 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		}
 	}
 
-
 	return &UploadResponse{
 		ID:              doc.ID,
 		Filename:        doc.Filename,
@@ -657,7 +618,32 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		Segments:        createdSegments,
 		ExtractedFields: extractedFieldsMap,
 		Pages:           createdPages,
-		ReconEventID:    reconEventID,
+		TableGroups: func() []map[string]any {
+			if aiResult == nil {
+				return nil
+			}
+			return aiResult.TableGroups
+		}(),
+		MLExtraction: func() map[string]any {
+			if aiResult == nil {
+				return nil
+			}
+			return aiResult.MLExtraction
+		}(),
+		ArithmeticValidation: func() map[string]any {
+			if aiResult == nil {
+				return nil
+			}
+			return aiResult.ArithmeticValidation
+		}(),
+		RequiresHumanReview: func() bool { return aiResult != nil && aiResult.RequiresHumanReview }(),
+		PipelineVersion: func() string {
+			if aiResult == nil {
+				return ""
+			}
+			return aiResult.PipelineVersion
+		}(),
+		ReconEventID: reconEventID,
 	}, nil
 }
 
@@ -885,7 +871,6 @@ func extractCanonicalEntities(
 		raEvidence["agreement_id"] = src.Source
 	}
 
-
 	invCanon := &model.InvoiceCanonical{
 		InvoiceID:        invNum,
 		InvoiceNumber:    invNum,
@@ -1059,7 +1044,6 @@ func (r *Resource) ReprocessDocument(ctx context.Context, id string) (*Document,
 	return doc, nil
 }
 
-
 // GetDocument retrieves document metadata by ID
 func (r *Resource) GetDocument(ctx context.Context, id string) (*Document, error) {
 	return r.db.FindByID(ctx, id)
@@ -1100,11 +1084,18 @@ func (r *Resource) Download(ctx context.Context, id string) (io.ReadCloser, *Doc
 		if err == nil {
 			return reader, doc, nil
 		}
+		// Never substitute a synthetic document: the viewer overlays bboxes on this file.
+		return nil, nil, fmt.Errorf("original file for document '%s' is unavailable: %w", id, err)
 	}
+	return nil, nil, fmt.Errorf("document '%s' has no stored original file", id)
+}
 
-	// Fallback: Generate a valid downloadable PDF bundle with document metadata
-	pdfBytes := generateFallbackDocumentPDF(doc)
-	return io.NopCloser(bytes.NewReader(pdfBytes)), doc, nil
+// ListFieldEvidence returns persisted field evidence (bbox normalized to the page image).
+func (r *Resource) ListFieldEvidence(ctx context.Context, id string, page int) ([]FieldEvidence, error) {
+	if _, err := r.db.FindByID(ctx, id); err != nil {
+		return nil, err
+	}
+	return r.db.ListFieldEvidence(ctx, id, page)
 }
 
 func generateFallbackDocumentPDF(doc *Document) []byte {
@@ -1137,3 +1128,100 @@ func sanitizePDFString(s string) string {
 	return s
 }
 
+// isNilValue reports whether an AI value is empty (nil or the literal Go "<nil>" rendering).
+func isNilValue(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	s := strings.TrimSpace(fmt.Sprintf("%v", v))
+	return s == "" || s == "<nil>"
+}
+
+// persistFieldEvidence writes field_evidence rows once per (segment,page,field,value,bbox).
+// Source priority: segment extractions, then logical extractions, then flat fields; a field
+// already covered by a higher-priority source is not written again. Empty values are skipped.
+func (r *Resource) persistFieldEvidence(ctx context.Context, docID string, segs []DocumentSegment, ai *AIExtractionResult, now time.Time) {
+	if ai == nil {
+		return
+	}
+	defaultSegID := ""
+	if len(segs) > 0 {
+		defaultSegID = segs[0].ID
+	}
+	seen := map[string]bool{}
+	write := func(segID string, f model.ExtractedField) {
+		r.writeEvidenceRow(ctx, docID, segID, f.Field, f.Value, f.Confidence, f.Source, now, seen)
+	}
+	for _, se := range ai.SegmentExtractions {
+		segID := defaultSegID
+		for _, cs := range segs {
+			if cs.SegmentNumber == se.SegmentNumber {
+				segID = cs.ID
+				break
+			}
+		}
+		for _, f := range se.ExtractedFields {
+			write(segID, f)
+		}
+	}
+	if len(ai.SegmentExtractions) == 0 {
+		for docType, fields := range ai.LogicalExtractions {
+			segID := defaultSegID
+			for _, cs := range segs {
+				if cs.DocumentType == docType {
+					segID = cs.ID
+					break
+				}
+			}
+			for _, f := range fields {
+				r.writeEvidenceRow(ctx, docID, segID, f.Field, f.Value, f.Confidence, f.Source, now, seen)
+			}
+		}
+		if len(ai.LogicalExtractions) == 0 {
+			for _, f := range ai.ExtractedFields {
+				r.writeEvidenceRow(ctx, docID, defaultSegID, f.Field, f.Value, f.Confidence, f.Source, now, seen)
+			}
+		}
+	}
+}
+
+func (r *Resource) writeEvidenceRow(ctx context.Context, docID, segID, field string, value interface{}, conf float64, src model.EvidenceSource, now time.Time, seen map[string]bool) {
+	if isNilValue(value) || segID == "" {
+		return // segment_id is a required FK; never substitute the document id
+	}
+	page := src.Page
+	if page <= 0 {
+		page = 1
+	}
+	val := fmt.Sprintf("%v", value)
+	key := fmt.Sprintf("%s|%d|%s|%s", segID, page, field, val)
+	if b := src.BBox; b != nil && !(b.X1 >= 0 && b.Y1 >= 0 && b.X2 <= 1.001 && b.Y2 <= 1.001 && b.X2 > b.X1 && b.Y2 > b.Y1) {
+		src.BBox = nil // would violate valid_bbox_coords; keep the value without a box
+	}
+	if src.BBox != nil {
+		key += fmt.Sprintf("|%.4f,%.4f,%.4f,%.4f", src.BBox.X1, src.BBox.Y1, src.BBox.X2, src.BBox.Y2)
+	}
+	if seen[key] {
+		return
+	}
+	seen[key] = true
+	space := "page_image_normalized"
+	payload := map[string]interface{}{
+		"id":               model.NewUUID(),
+		"document_id":      docID,
+		"segment_id":       segID,
+		"page_number":      page,
+		"field_name":       field,
+		"field_value":      val,
+		"confidence":       conf,
+		"coordinate_space": space,
+		"created_at":       now,
+	}
+	if src.BBox != nil {
+		payload["bbox_x1"] = src.BBox.X1
+		payload["bbox_y1"] = src.BBox.Y1
+		payload["bbox_x2"] = src.BBox.X2
+		payload["bbox_y2"] = src.BBox.Y2
+	}
+	_ = r.db.InsertFieldEvidence(ctx, payload)
+}

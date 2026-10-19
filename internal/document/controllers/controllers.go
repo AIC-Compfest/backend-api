@@ -1,11 +1,15 @@
 package controllers
 
 import (
+	"bytes"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
+	"time"
 
 	"backend-api/internal/document"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -68,9 +72,31 @@ func Download(res *document.Resource) gin.HandlerFunc {
 		}
 		defer reader.Close()
 
-		c.Header("Content-Disposition", "inline; filename="+doc.Filename)
+		// Uploads are capped at MaxDocumentSizeBytes, so buffering is bounded.
+		// A seekable body lets ServeContent set Content-Length and honour Range (pdf.js).
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read stored document"})
+			return
+		}
+		c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": doc.Filename}))
 		c.Header("Content-Type", doc.MimeType)
-		_, _ = io.Copy(c.Writer, reader)
+		c.Header("Cache-Control", "private, max-age=300")
+		http.ServeContent(c.Writer, c.Request, doc.Filename, time.Time{}, bytes.NewReader(data))
+	}
+}
+
+// Evidence handles GET /api/v1/documents/:id/evidence?page=N
+func Evidence(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "0"))
+		rows, err := res.ListFieldEvidence(c.Request.Context(), id, page)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"document_id": id, "count": len(rows), "evidence": rows})
 	}
 }
 
@@ -154,4 +180,3 @@ func ListSegments(res *document.Resource) gin.HandlerFunc {
 		})
 	}
 }
-

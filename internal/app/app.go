@@ -36,7 +36,8 @@ func New(cfg config.Config) *Application {
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, Range")
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, Content-Range, Accept-Ranges")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
 
 		if c.Request.Method == "OPTIONS" {
@@ -96,6 +97,7 @@ func New(cfg config.Config) *Application {
 	docRes := document.NewResource(docDB, store)
 	docRes.SetEventSink(reconDB)
 	docRes.SetAIServiceURL(cfg.AIServiceURL)
+	docRes.SetAIServiceTimeout(cfg.AIServiceTimeout)
 
 	// 4. Register API v1 Modular Routes
 	v1 := router.Group("/api/v1")

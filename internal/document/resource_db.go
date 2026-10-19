@@ -186,7 +186,6 @@ func (r *ResourceDB) UpdateApprovalStatus(ctx context.Context, id string, status
 	return nil
 }
 
-
 // List retrieves paginated documents from Supabase DB or cache
 func (r *ResourceDB) List(ctx context.Context, page, pageSize int, statusFilter string) ([]Document, int64, error) {
 	if page < 1 {
@@ -271,13 +270,13 @@ func (r *ResourceDB) InsertPage(ctx context.Context, p *DocumentPage) error {
 
 	if r.dbClient != nil {
 		payload := map[string]interface{}{
-			"id":               p.ID,
-			"document_id":      p.DocumentID,
-			"page_number":      p.PageNumber,
-			"width":            p.Width,
-			"height":           p.Height,
-			"ocr_confidence":   p.OCRConfidence,
-			"created_at":       p.CreatedAt,
+			"id":             p.ID,
+			"document_id":    p.DocumentID,
+			"page_number":    p.PageNumber,
+			"width":          p.Width,
+			"height":         p.Height,
+			"ocr_confidence": p.OCRConfidence,
+			"created_at":     p.CreatedAt,
 		}
 		if p.OCRText != "" {
 			payload["ocr_text"] = p.OCRText
@@ -444,7 +443,6 @@ func (r *ResourceDB) InsertRateAgreement(ctx context.Context, payload map[string
 	return nil
 }
 
-
 // InsertSegment saves a document segment record into Supabase DB and local cache
 func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) error {
 	if seg.ID == "" {
@@ -495,7 +493,6 @@ func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) er
 	return nil
 }
 
-
 // ListSegments returns all segments associated with a document ordered by segment_number
 func (r *ResourceDB) ListSegments(ctx context.Context, docID string) ([]DocumentSegment, error) {
 	if r.dbClient != nil {
@@ -520,9 +517,47 @@ func (r *ResourceDB) ListSegments(ctx context.Context, docID string) ([]Document
 func (r *ResourceDB) InsertFieldEvidence(ctx context.Context, payload map[string]interface{}) error {
 	if r.dbClient != nil {
 		var out []map[string]interface{}
-		_ = r.dbClient.Insert(ctx, "field_evidence", payload, &out)
+		if err := r.dbClient.Insert(ctx, "field_evidence", payload, &out); err != nil {
+			fmt.Printf("[ResourceDB.InsertFieldEvidence] Error inserting %v: %v\n", payload["field_name"], err)
+			return err
+		}
 	}
 	return nil
+}
+
+// FieldEvidence is a persisted field with its normalized bbox on a page of the document.
+type FieldEvidence struct {
+	ID              string   `json:"id"`
+	SegmentID       string   `json:"segment_id"`
+	DocumentID      string   `json:"document_id"`
+	PageNumber      int      `json:"page_number"`
+	FieldName       string   `json:"field_name"`
+	FieldValue      string   `json:"field_value"`
+	Confidence      float64  `json:"confidence"`
+	BBoxX1          *float64 `json:"bbox_x1"`
+	BBoxY1          *float64 `json:"bbox_y1"`
+	BBoxX2          *float64 `json:"bbox_x2"`
+	BBoxY2          *float64 `json:"bbox_y2"`
+	CoordinateSpace string   `json:"coordinate_space"`
+}
+
+// ListFieldEvidence returns evidence rows for a document, optionally filtered by page.
+func (r *ResourceDB) ListFieldEvidence(ctx context.Context, docID string, page int) ([]FieldEvidence, error) {
+	if r.dbClient == nil {
+		return []FieldEvidence{}, nil
+	}
+	rows := []FieldEvidence{}
+	params := url.Values{}
+	params.Set("document_id", "eq."+docID)
+	if page > 0 {
+		params.Set("page_number", fmt.Sprintf("eq.%d", page))
+	}
+	params.Set("order", "page_number.asc,field_name.asc")
+	params.Set("limit", "2000")
+	if err := r.dbClient.Query(ctx, "field_evidence", params, &rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // EnsureVendorExists checks if vendor_id is in vendors table, if not inserts it automatically

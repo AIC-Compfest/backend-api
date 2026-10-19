@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"backend-api/internal/document"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -13,6 +14,7 @@ func RegisterRoutes(rg *gin.RouterGroup, res *document.Resource) {
 		group.GET("", List(res))
 		group.GET("/:id", Get(res))
 		group.GET("/:id/download", Download(res))
+		group.GET("/:id/evidence", Evidence(res))
 		group.GET("/:id/pipeline-status", PipelineStatus(res))
 		group.GET("/:id/segments", ListSegments(res))
 		group.GET("/:id/pages", ListPages(res))
@@ -20,4 +22,3 @@ func RegisterRoutes(rg *gin.RouterGroup, res *document.Resource) {
 		group.POST("/:id/pages/:page_number/retry", RetryPage(res))
 	}
 }
-

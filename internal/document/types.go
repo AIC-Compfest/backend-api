@@ -10,7 +10,7 @@ type Document struct {
 	MimeType                 string     `json:"mime_type"`
 	Sha256Hash               string     `json:"sha256_hash"`
 	StoragePath              string     `json:"storage_path"`
-	Status                   string     `json:"status"` // PENDING, PROCESSING, COMPLETED, FAILED
+	Status                   string     `json:"status"`                    // PENDING, PROCESSING, COMPLETED, FAILED
 	StatusApproval           string     `json:"status_approval,omitempty"` // UNDER_REVIEW, ACCEPTED, REJECTED, DISPUTED
 	Classification           string     `json:"classification,omitempty"`
 	ClassificationConfidence float64    `json:"classification_confidence,omitempty"`
@@ -83,22 +83,27 @@ type PipelineStatusResponse struct {
 
 // UploadResponse payload
 type UploadResponse struct {
-	ID              string                 `json:"id"`
-	Filename        string                 `json:"filename"`
-	FileSize        int64                  `json:"file_size"`
-	MimeType        string                 `json:"mime_type"`
-	Sha256Hash      string                 `json:"sha256_hash"`
-	Classification  string                 `json:"classification"`
-	Status          string                 `json:"status"`
-	Confidence      float64                `json:"confidence"`
-	IsDuplicate     bool                   `json:"is_duplicate"`
-	PageCount       int                    `json:"page_count,omitempty"`
-	StorageURL      string                 `json:"storage_url,omitempty"`
-	SegmentsURL     string                 `json:"segments_url,omitempty"`
-	Segments        []DocumentSegment      `json:"segments,omitempty"`
-	ExtractedFields map[string]interface{} `json:"extracted_fields,omitempty"`
-	Pages           []DocumentPage         `json:"pages,omitempty"`
-	ReconEventID    string                 `json:"recon_event_id,omitempty"`
+	ID                   string                 `json:"id"`
+	Filename             string                 `json:"filename"`
+	FileSize             int64                  `json:"file_size"`
+	MimeType             string                 `json:"mime_type"`
+	Sha256Hash           string                 `json:"sha256_hash"`
+	Classification       string                 `json:"classification"`
+	Status               string                 `json:"status"`
+	Confidence           float64                `json:"confidence"`
+	IsDuplicate          bool                   `json:"is_duplicate"`
+	PageCount            int                    `json:"page_count,omitempty"`
+	StorageURL           string                 `json:"storage_url,omitempty"`
+	SegmentsURL          string                 `json:"segments_url,omitempty"`
+	Segments             []DocumentSegment      `json:"segments,omitempty"`
+	ExtractedFields      map[string]interface{} `json:"extracted_fields,omitempty"`
+	Pages                []DocumentPage         `json:"pages,omitempty"`
+	TableGroups          []map[string]any       `json:"table_groups,omitempty"`
+	MLExtraction         map[string]any         `json:"ml_extraction,omitempty"`
+	ArithmeticValidation map[string]any         `json:"arithmetic_validation,omitempty"`
+	RequiresHumanReview  bool                   `json:"requires_human_review,omitempty"`
+	PipelineVersion      string                 `json:"pipeline_version,omitempty"`
+	ReconEventID         string                 `json:"recon_event_id,omitempty"`
 }
 
 // Pagination metadata
@@ -114,4 +119,3 @@ type ListResponse struct {
 	Data       []Document `json:"data"`
 	Pagination Pagination `json:"pagination"`
 }
-

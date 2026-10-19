@@ -137,7 +137,7 @@ func (r *ResourceDB) loadFieldEvidence(ctx context.Context, documentID string) m
 		params := url.Values{}
 		params.Set("document_id", "eq."+documentID)
 		params.Set("order", "page_number.asc")
-		params.Set("limit", "100")
+		params.Set("limit", "2000")
 
 		if err := r.dbClient.Query(ctx, "field_evidence", params, &rows); err == nil && len(rows) > 0 {
 			for _, row := range rows {
@@ -166,43 +166,11 @@ func (r *ResourceDB) loadFieldEvidence(ctx context.Context, documentID string) m
 						Y2: by2,
 					}
 				}
+				// Never let a bbox-less row (e.g. empty value) shadow a located one.
+				if prev, ok := evMap[fieldName]; ok && prev.BBox != nil && ev.BBox == nil {
+					continue
+				}
 				evMap[fieldName] = ev
-			}
-		}
-	}
-
-	// Deterministic spatial BBoxes for any standard fields
-	defaults := map[string]model.BoundingBox{
-		"billed_amount":      {X1: 0.65, Y1: 0.82, X2: 0.92, Y2: 0.88},
-		"total_amount":       {X1: 0.65, Y1: 0.82, X2: 0.92, Y2: 0.88},
-		"grand_total":        {X1: 0.65, Y1: 0.82, X2: 0.92, Y2: 0.88},
-		"destination":        {X1: 0.20, Y1: 0.35, X2: 0.45, Y2: 0.40},
-		"origin":             {X1: 0.20, Y1: 0.25, X2: 0.45, Y2: 0.30},
-		"weight_billed_kg":   {X1: 0.55, Y1: 0.48, X2: 0.75, Y2: 0.53},
-		"billed_weight_kg":   {X1: 0.55, Y1: 0.48, X2: 0.75, Y2: 0.53},
-		"weight_actual_kg":   {X1: 0.20, Y1: 0.42, X2: 0.48, Y2: 0.47},
-		"invoice_number":     {X1: 0.60, Y1: 0.12, X2: 0.90, Y2: 0.17},
-		"invoice_id":         {X1: 0.60, Y1: 0.12, X2: 0.90, Y2: 0.17},
-		"invoice_date":       {X1: 0.60, Y1: 0.18, X2: 0.85, Y2: 0.23},
-		"date":               {X1: 0.60, Y1: 0.18, X2: 0.85, Y2: 0.23},
-		"surat_jalan_number": {X1: 0.55, Y1: 0.10, X2: 0.90, Y2: 0.15},
-		"signature":          {X1: 0.60, Y1: 0.68, X2: 0.88, Y2: 0.85},
-		"delivery_date":      {X1: 0.20, Y1: 0.20, X2: 0.50, Y2: 0.25},
-		"base_rate":          {X1: 0.10, Y1: 0.30, X2: 0.50, Y2: 0.35},
-		"fuel_surcharge":     {X1: 0.10, Y1: 0.40, X2: 0.50, Y2: 0.45},
-	}
-
-	for k, bbox := range defaults {
-		if existing, exists := evMap[k]; !exists || existing.BBox == nil {
-			evMap[k] = model.EvidenceSource{
-				DocumentID: documentID,
-				Page:       1,
-				BBox: &model.BoundingBox{
-					X1: bbox.X1,
-					Y1: bbox.Y1,
-					X2: bbox.X2,
-					Y2: bbox.Y2,
-				},
 			}
 		}
 	}
@@ -234,15 +202,15 @@ func (r *ResourceDB) SeedFromPilotDataset(datasetDir string) error {
 			TransactionID string  `json:"transaction_id"`
 			ScenarioName  string  `json:"scenario_name"`
 			ShipmentID    string  `json:"shipment_id"`
-			InvoiceID      string  `json:"invoice_id"`
-			VendorID       string  `json:"vendor_id"`
-			Origin         string  `json:"origin"`
-			Destination    string  `json:"destination"`
-			ServiceType    string  `json:"service_type"`
-			ShipmentDate   string  `json:"shipment_date"`
-			WeightKg       float64 `json:"weight_kg"`
-			Quantity       int     `json:"quantity"`
-			Contract       struct {
+			InvoiceID     string  `json:"invoice_id"`
+			VendorID      string  `json:"vendor_id"`
+			Origin        string  `json:"origin"`
+			Destination   string  `json:"destination"`
+			ServiceType   string  `json:"service_type"`
+			ShipmentDate  string  `json:"shipment_date"`
+			WeightKg      float64 `json:"weight_kg"`
+			Quantity      int     `json:"quantity"`
+			Contract      struct {
 				AgreementID      string  `json:"agreement_id"`
 				BaseRate         int64   `json:"base_rate"`
 				FuelSurchargePct float64 `json:"fuel_surcharge_percent"`
@@ -263,17 +231,17 @@ func (r *ResourceDB) SeedFromPilotDataset(datasetDir string) error {
 		}
 
 		inv := &model.InvoiceCanonical{
-			InvoiceID:        gt.InvoiceID,
-			InvoiceNumber:    gt.InvoiceID,
-			InvoiceDate:      gt.ShipmentDate,
-			VendorID:         gt.VendorID,
-			ServiceType:      gt.ServiceType,
-			Origin:           gt.Origin,
-			Destination:      gt.Destination,
-			WeightBilledKg:   gt.WeightKg,
-			BilledAmount:     gt.BilledCharge,
-			TaxBilled:        gt.TaxAmount,
-			Currency:         "IDR",
+			InvoiceID:      gt.InvoiceID,
+			InvoiceNumber:  gt.InvoiceID,
+			InvoiceDate:    gt.ShipmentDate,
+			VendorID:       gt.VendorID,
+			ServiceType:    gt.ServiceType,
+			Origin:         gt.Origin,
+			Destination:    gt.Destination,
+			WeightBilledKg: gt.WeightKg,
+			BilledAmount:   gt.BilledCharge,
+			TaxBilled:      gt.TaxAmount,
+			Currency:       "IDR",
 			FieldEvidence: map[string]model.EvidenceSource{
 				"billed_amount": {DocumentID: gt.InvoiceID, Page: 1, BBox: &model.BoundingBox{X1: 0.65, Y1: 0.85, X2: 0.95, Y2: 0.90}},
 			},
@@ -848,14 +816,13 @@ func (r *ResourceDB) GetEventByID(ctx context.Context, id string) (*model.Shipme
 	return nil, fmt.Errorf("reconciliation event '%s' not found", id)
 }
 
-
 // ListAllEvents returns all stored events from Supabase DB (Single Source of Truth)
 func (r *ResourceDB) ListAllEvents(ctx context.Context) ([]*model.ShipmentEvent, error) {
 	if r.dbClient != nil {
 		var dbRows []map[string]interface{}
 		params := url.Values{}
 		params.Set("order", "created_at.desc")
-		params.Set("limit", "100")
+		params.Set("limit", "2000")
 		err := r.dbClient.Query(ctx, "shipment_events", params, &dbRows)
 		if err == nil {
 			// Supabase query succeeded: Build directly from Supabase rows
@@ -931,13 +898,13 @@ func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision 
 		}
 
 		decisionPayload := map[string]interface{}{
-			"id":           model.NewUUID(),
-			"case_id":      nil, // diisi jika ada reconciliation_case
-			"action":       dbAction,
-			"reviewer_id":  decision.ActorID,
+			"id":            model.NewUUID(),
+			"case_id":       nil, // diisi jika ada reconciliation_case
+			"action":        dbAction,
+			"reviewer_id":   decision.ActorID,
 			"reviewer_role": decision.ActorRole,
-			"reason":       decision.Notes,
-			"created_at":   now,
+			"reason":        decision.Notes,
+			"created_at":    now,
 		}
 
 		// Cari case_id yang terkait
@@ -1012,15 +979,15 @@ func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision 
 
 		// Write to audit_events (append-only immutable ledger)
 		auditPayload := map[string]interface{}{
-			"id":             model.NewUUID(),
-			"event_id":       eventUUID,
-			"actor_id":       decision.ActorID,
-			"actor_role":     decision.ActorRole,
-			"action":         decision.Action,
+			"id":              model.NewUUID(),
+			"event_id":        eventUUID,
+			"actor_id":        decision.ActorID,
+			"actor_role":      decision.ActorRole,
+			"action":          decision.Action,
 			"previous_status": previousStatus,
-			"new_status":     newStatus,
-			"notes":          decision.Notes,
-			"timestamp":      now,
+			"new_status":      newStatus,
+			"notes":           decision.Notes,
+			"timestamp":       now,
 		}
 		var aOut []map[string]interface{}
 		if err := r.dbClient.Insert(ctx, "audit_events", auditPayload, &aOut); err != nil {
@@ -1114,23 +1081,23 @@ func (r *ResourceDB) ReleaseEvent(ctx context.Context, eventID string, releasedB
 
 	// Insert into audit_ledger (immutable)
 	ledgerPayload := map[string]interface{}{
-		"id":                      model.NewUUID(),
-		"event_id":                eventUUID,
+		"id":                     model.NewUUID(),
+		"event_id":               eventUUID,
 		"reconciliation_case_id": caseUUID,
-		"shipment_id":             shipmentID,
-		"invoice_number":          invoiceNumber,
-		"vendor_id":               vendorID,
-		"vendor_name":             vendorName,
-		"billed_amount":           billedVal,
-		"expected_amount":         expectedVal,
-		"variance_amount":         diffVal,
-		"final_decision":          finalDecision,
-		"released_by":             releasedBy,
-		"released_by_role":        releasedByRole,
-		"released_at":             now,
-		"reviewer_notes":          notes,
-		"discrepancy_summary":     "[]",
-		"created_at":              now,
+		"shipment_id":            shipmentID,
+		"invoice_number":         invoiceNumber,
+		"vendor_id":              vendorID,
+		"vendor_name":            vendorName,
+		"billed_amount":          billedVal,
+		"expected_amount":        expectedVal,
+		"variance_amount":        diffVal,
+		"final_decision":         finalDecision,
+		"released_by":            releasedBy,
+		"released_by_role":       releasedByRole,
+		"released_at":            now,
+		"reviewer_notes":         notes,
+		"discrepancy_summary":    "[]",
+		"created_at":             now,
 	}
 	var ledgerOut []map[string]interface{}
 	if err := r.dbClient.Insert(ctx, "audit_ledger", ledgerPayload, &ledgerOut); err != nil {
@@ -1188,7 +1155,7 @@ func (r *ResourceDB) ListAuditLogs(ctx context.Context, eventID string) ([]model
 		var results []map[string]interface{}
 		params := url.Values{}
 		params.Set("order", "created_at.desc")
-		params.Set("limit", "100")
+		params.Set("limit", "2000")
 		if eventID != "" {
 			params.Set("or", fmt.Sprintf("(event_id.eq.%s,actor_id.eq.%s)", eventID, eventID))
 		}
@@ -1245,4 +1212,3 @@ func (r *ResourceDB) ListAuditLogs(ctx context.Context, eventID string) ([]model
 	}
 	return filtered, nil
 }
-
