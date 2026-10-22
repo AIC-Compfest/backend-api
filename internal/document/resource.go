@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"backend-api/internal/model"
-	serviceRecon "backend-api/internal/service/reconciliation"
 	"backend-api/internal/storage"
 )
 
@@ -113,6 +112,7 @@ type AIExtractionResult struct {
 	SegmentExtractions    []AISegmentExtraction         `json:"segment_extractions"`
 	LogicalDocumentGroups map[string][]int              `json:"logical_document_groups"`
 	Pages                 []AIPageResult                `json:"pages"`
+	Evidence              json.RawMessage               `json:"evidence,omitempty"`
 	RawExtractedFields    json.RawMessage               `json:"extracted_fields"`
 	ExtractedFields       []AIExtractedField            `json:"-"`
 	LogicalExtractions    map[string][]AIExtractedField `json:"-"`
@@ -124,6 +124,7 @@ type AIExtractionResult struct {
 	ExtractionAttempted   bool                          `json:"extraction_attempted"`
 	PipelineVersion       string                        `json:"pipeline_version,omitempty"`
 	ErrorCode             string                        `json:"error_code"`
+	RawPayload            json.RawMessage               `json:"-"`
 }
 
 // Resource handles document business logic, AI extraction, and file storage
@@ -220,7 +221,12 @@ func (r *Resource) extractViaAI(ctx context.Context, filename string, fileBytes 
 	}
 
 	var result AIExtractionResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	rawPayload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read ai-service pipeline/full response: %w", err)
+	}
+	result.RawPayload = append(json.RawMessage(nil), rawPayload...)
+	if err := json.Unmarshal(rawPayload, &result); err != nil {
 		return nil, fmt.Errorf("decode ai-service pipeline/full response: %w", err)
 	}
 	if result.Status == "" {
@@ -250,7 +256,13 @@ func (r *Resource) extractViaAI(ctx context.Context, filename string, fileBytes 
 }
 
 // Upload processes an uploaded multipart file, computes SHA-256, stores binary, runs AI extraction, and creates a live reconciliation event
-func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader) (*UploadResponse, error) {
+func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader, ingestBatchID string) (*UploadResponse, error) {
+	if ingestBatchID == "" || !isUUID(ingestBatchID) {
+		ingestBatchID = model.NewUUID()
+	}
+	if err := r.db.EnsureIngestBatch(ctx, ingestBatchID); err != nil {
+		return nil, fmt.Errorf("failed to create ingest batch: %w", err)
+	}
 	if fileHeader.Size > MaxDocumentSizeBytes {
 		return nil, fmt.Errorf("file '%s' melebihi batas ukuran maksimum 10 MB (ukuran: %.2f MB)", fileHeader.Filename, float64(fileHeader.Size)/(1024*1024))
 	}
@@ -292,6 +304,7 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 			StorageURL:     existing.StoragePath,
 			SegmentsURL:    fmt.Sprintf("/api/v1/documents/%s/segments", existing.ID),
 			Segments:       existingSegs,
+			IngestBatchID:  existing.IngestBatchID,
 		}, nil
 	}
 
@@ -368,13 +381,13 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		Classification:           docClass,
 		ClassificationConfidence: docConf,
 		PageCount:                pageCount,
+		IngestBatchID:            ingestBatchID,
 		CreatedAt:                now,
 	}
 
 	if err := r.db.Create(ctx, doc); err != nil {
 		return nil, fmt.Errorf("failed to save document metadata: %w", err)
 	}
-
 	// 5. Persist segments into document_segments table in Supabase
 	var createdSegments []DocumentSegment
 	if aiResult != nil && len(aiResult.Segments) > 0 {
@@ -484,121 +497,11 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		createdPages = append(createdPages, pageRecord)
 	}
 
-	// Save extraction record to document_extractions table in Supabase
-	_ = r.db.InsertExtraction(ctx, doc.ID, extractedFieldsMap, initialConf)
-
-	// Persist field_evidence rows with OCR bounding boxes (PRD 18, Migration 008)
-	r.persistFieldEvidence(ctx, doc.ID, createdSegments, aiResult, now)
-
-	// Extract real canonical entities from AI extraction results
-	invCanon, sjCanon, podCanon, ctrCanon := extractCanonicalEntities(doc.ID, hashStr, fileHeader.Filename, aiResult, extractedFieldsMap, now)
-
-	// Persist specialized classified domain records into Supabase
-	if sjCanon != nil {
-		_ = r.db.InsertSuratJalan(ctx, map[string]interface{}{
-			"id":                 model.NewUUID(),
-			"document_id":        doc.ID,
-			"surat_jalan_number": sjCanon.SuratJalanNumber,
-			"shipment_id":        sjCanon.ShipmentID,
-			"awb_number":         sjCanon.AWBNumber,
-			"shipment_date":      sjCanon.ShipmentDate,
-			"sender_name":        "Warehouse " + sjCanon.Origin,
-			"sender_city":        sjCanon.Origin,
-			"receiver_name":      "Receiving Warehouse " + sjCanon.Destination,
-			"receiver_city":      sjCanon.Destination,
-			"actual_weight_kg":   sjCanon.WeightActualKg,
-			"total_packages":     sjCanon.TotalPackages,
-			"created_at":         now,
-		})
-	}
-
-	if podCanon != nil {
-		_ = r.db.InsertPOD(ctx, map[string]interface{}{
-			"id":                model.NewUUID(),
-			"document_id":       doc.ID,
-			"pod_number":        podCanon.PODNumber,
-			"shipment_id":       podCanon.ShipmentID,
-			"awb_number":        podCanon.AWBNumber,
-			"delivery_status":   podCanon.DeliveryStatus,
-			"delivery_date":     podCanon.DeliveryDate,
-			"receiver_name":     podCanon.ReceiverName,
-			"signature_present": podCanon.SignaturePresent,
-			"stamp_present":     podCanon.StampPresent,
-			"created_at":        now,
-		})
-	}
-
-	if invCanon != nil {
-		if invCanon.VendorID != "" {
-			r.db.EnsureVendorExists(ctx, invCanon.VendorID, invCanon.VendorName)
-		}
-		_ = r.db.InsertInvoice(ctx, map[string]interface{}{
-			"id":             model.NewUUID(),
-			"document_id":    doc.ID,
-			"invoice_number": invCanon.InvoiceNumber,
-			"vendor_id":      invCanon.VendorID,
-			"vendor_name":    invCanon.VendorName,
-			"shipment_id":    invCanon.ShipmentID,
-			"awb_number":     invCanon.AWBNumber,
-			"invoice_date":   invCanon.InvoiceDate,
-			"subtotal":       invCanon.BaseChargeBilled,
-			"tax_amount":     invCanon.TaxBilled,
-			"grand_total":    invCanon.BilledAmount,
-			"currency":       invCanon.Currency,
-			"created_at":     now,
-		})
-	}
-
-	if ctrCanon != nil {
-		vendorName := ctrCanon.VendorID
-		if invCanon != nil && invCanon.VendorName != "" {
-			vendorName = invCanon.VendorName
-		}
-		if ctrCanon.VendorID != "" {
-			r.db.EnsureVendorExists(ctx, ctrCanon.VendorID, vendorName)
-		}
-		effFrom := ctrCanon.EffectiveFrom
-		if effFrom == "" {
-			effFrom = "2026-01-01"
-		}
-		effTo := ctrCanon.EffectiveTo
-		if effTo == "" {
-			effTo = "2026-12-31"
-		}
-		_ = r.db.InsertRateAgreement(ctx, map[string]interface{}{
-			"id":                     model.NewUUID(),
-			"document_id":            doc.ID,
-			"agreement_id":           ctrCanon.AgreementID,
-			"vendor_id":              ctrCanon.VendorID,
-			"vendor_name":            vendorName,
-			"effective_from":         effFrom,
-			"effective_to":           effTo,
-			"currency":               "IDR",
-			"fuel_surcharge_percent": ctrCanon.ApplicableFuelSurchargePercent,
-			"minimum_charge":         ctrCanon.MinimumCharge,
-			"dispute_window_days":    ctrCanon.DisputeWindowDays,
-			"created_at":             now,
-		})
-	}
-
 	var reconEventID string
-
-	// Automatically Run 4-Way Matching & Register Reconciliation Event
-	if r.eventSink != nil && invCanon != nil {
-		engine := serviceRecon.NewEngine()
-		event, err := engine.ReconcileTransaction(invCanon, sjCanon, podCanon, ctrCanon)
-		if err == nil && event != nil {
-			_ = r.eventSink.SaveEvent(ctx, event)
-			reconEventID = event.EventID
-
-			// Update approval status based on reconciliation outcome
-			if event.Reconciliation.Status == model.StatusMatch {
-				doc.StatusApproval = "ACCEPTED"
-				_ = r.db.UpdateApprovalStatus(ctx, doc.ID, "ACCEPTED")
-			} else {
-				doc.StatusApproval = "UNDER_REVIEW"
-				_ = r.db.UpdateApprovalStatus(ctx, doc.ID, "UNDER_REVIEW")
-			}
+	if aiResult != nil {
+		if err := r.db.PersistAIResult(ctx, doc.ID, ingestBatchID, fileHeader.Filename, hashStr, mimeType, aiResult); err != nil {
+			_ = r.db.UpdateStatus(ctx, doc.ID, "FAILED", "", 0)
+			return nil, fmt.Errorf("failed to persist AI pipeline result: %w", err)
 		}
 	}
 
@@ -616,6 +519,7 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader)
 		StorageURL:      storagePath,
 		SegmentsURL:     fmt.Sprintf("/api/v1/documents/%s/segments", doc.ID),
 		Segments:        createdSegments,
+		IngestBatchID:   doc.IngestBatchID,
 		ExtractedFields: extractedFieldsMap,
 		Pages:           createdPages,
 		TableGroups: func() []map[string]any {
@@ -1047,6 +951,17 @@ func (r *Resource) ReprocessDocument(ctx context.Context, id string) (*Document,
 // GetDocument retrieves document metadata by ID
 func (r *Resource) GetDocument(ctx context.Context, id string) (*Document, error) {
 	return r.db.FindByID(ctx, id)
+}
+
+func (r *Resource) GetDocumentProfile(ctx context.Context, id string) (*DocumentProfile, error) {
+	return r.db.GetProfile(ctx, id)
+}
+
+func (r *Resource) ReviewField(ctx context.Context, documentID string, request FieldReviewRequest) (*DocumentProfile, error) {
+	if err := r.db.ReviewField(ctx, documentID, request); err != nil {
+		return nil, err
+	}
+	return r.db.GetProfile(ctx, documentID)
 }
 
 // ListDocuments retrieves a paginated list of documents

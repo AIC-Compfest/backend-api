@@ -15,6 +15,7 @@ type Document struct {
 	Classification           string     `json:"classification,omitempty"`
 	ClassificationConfidence float64    `json:"classification_confidence,omitempty"`
 	PageCount                int        `json:"page_count,omitempty"`
+	IngestBatchID            string     `json:"ingest_batch_id,omitempty"`
 	ErrorMessage             string     `json:"error_message,omitempty"`
 	CreatedAt                time.Time  `json:"created_at"`
 	UpdatedAt                *time.Time `json:"updated_at,omitempty"`
@@ -96,6 +97,7 @@ type UploadResponse struct {
 	StorageURL           string                 `json:"storage_url,omitempty"`
 	SegmentsURL          string                 `json:"segments_url,omitempty"`
 	Segments             []DocumentSegment      `json:"segments,omitempty"`
+	IngestBatchID        string                 `json:"ingest_batch_id,omitempty"`
 	ExtractedFields      map[string]interface{} `json:"extracted_fields,omitempty"`
 	Pages                []DocumentPage         `json:"pages,omitempty"`
 	TableGroups          []map[string]any       `json:"table_groups,omitempty"`
@@ -104,6 +106,24 @@ type UploadResponse struct {
 	RequiresHumanReview  bool                   `json:"requires_human_review,omitempty"`
 	PipelineVersion      string                 `json:"pipeline_version,omitempty"`
 	ReconEventID         string                 `json:"recon_event_id,omitempty"`
+}
+
+type DocumentProfile struct {
+	Document    *Document                `json:"document"`
+	Pages       []DocumentPage           `json:"pages"`
+	Segments    []DocumentSegment        `json:"segments"`
+	Pipeline    map[string]interface{}   `json:"pipeline,omitempty"`
+	Evidence    []FieldEvidence          `json:"evidence"`
+	Predictions []map[string]interface{} `json:"predictions"`
+	Decisions   []map[string]interface{} `json:"decisions"`
+}
+
+type FieldReviewRequest struct {
+	PredictionID       string      `json:"prediction_id"`
+	Action             string      `json:"action"`
+	ReviewedValue      interface{} `json:"reviewed_value"`
+	Reason             string      `json:"reason"`
+	ReviewerExternalID string      `json:"reviewer_external_id"`
 }
 
 // Pagination metadata

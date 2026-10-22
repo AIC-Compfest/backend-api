@@ -13,6 +13,8 @@ func RegisterRoutes(rg *gin.RouterGroup, res *document.Resource) {
 		group.POST("/upload", Upload(res))
 		group.GET("", List(res))
 		group.GET("/:id", Get(res))
+		group.GET("/:id/profile", Profile(res))
+		group.POST("/:id/reviews", ReviewField(res))
 		group.GET("/:id/download", Download(res))
 		group.GET("/:id/evidence", Evidence(res))
 		group.GET("/:id/pipeline-status", PipelineStatus(res))

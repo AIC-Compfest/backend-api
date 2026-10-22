@@ -24,6 +24,7 @@ type QueueItemDTO struct {
 	PrimaryDiscrepancy string  `json:"primary_discrepancy,omitempty"`
 	TopDiscrepancy     string  `json:"top_discrepancy,omitempty"`
 	CreatedAt          string  `json:"created_at"`
+	IngestBatchID      string     `json:"ingest_batch_id,omitempty"`
 }
 
 // QueueSummaryDTO holds aggregated metrics for the overview dashboard

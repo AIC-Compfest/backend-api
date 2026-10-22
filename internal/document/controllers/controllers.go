@@ -22,7 +22,7 @@ func Upload(res *document.Resource) gin.HandlerFunc {
 			return
 		}
 
-		resp, err := res.Upload(c.Request.Context(), fileHeader)
+		resp, err := res.Upload(c.Request.Context(), fileHeader, c.PostForm("ingest_batch_id"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -42,6 +42,33 @@ func Get(res *document.Resource) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, doc)
+	}
+}
+
+func Profile(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		profile, err := res.GetDocumentProfile(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, profile)
+	}
+}
+
+func ReviewField(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var request document.FieldReviewRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid review payload"})
+			return
+		}
+		profile, err := res.ReviewField(c.Request.Context(), c.Param("id"), request)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, profile)
 	}
 }
 

@@ -24,6 +24,22 @@ type ResourceDB struct {
 	audit    []model.AuditTrailItem
 }
 
+func (r *ResourceDB) GetDocumentBatchID(ctx context.Context, documentID string) string {
+	if r.dbClient == nil || documentID == "" {
+		return ""
+	}
+	var rows []map[string]interface{}
+	params := url.Values{}
+	params.Set("id", "eq."+documentID)
+	params.Set("select", "ingest_batch_id")
+	params.Set("limit", "1")
+	if err := r.dbClient.Query(ctx, "documents", params, &rows); err != nil || len(rows) == 0 {
+		return ""
+	}
+	batchID, _ := rows[0]["ingest_batch_id"].(string)
+	return batchID
+}
+
 // NewResourceDB creates a new reconciliation ResourceDB
 func NewResourceDB(dbClient *database.Client) *ResourceDB {
 	return &ResourceDB{
@@ -314,139 +330,169 @@ func (r *ResourceDB) SeedFromPilotDataset(datasetDir string) error {
 	return nil
 }
 
-// SaveEvent persists a shipment event into Supabase DB and cache, ensuring vendor is registered.
-// It also links FK domain tables (invoice_id, surat_jalan_id, pod_id, rate_agreement_id)
-// and auto-creates a reconciliation_case if one doesn't exist.
+// SaveEvent persists the canonical shipment, event, and review case projection.
 func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) error {
 	if event == nil || event.EventID == "" {
 		return fmt.Errorf("invalid shipment event payload")
 	}
-
-	if event.VendorID != "" {
-		vName := event.Invoice.VendorName
-		if vName == "" {
-			vName = r.GetVendorName(ctx, event.VendorID)
-		}
-		r.EnsureVendorExists(ctx, event.VendorID, vName)
-	}
-
 	if r.dbClient != nil {
-		// Resolve FK: invoice_id
-		var invoiceID, suratJalanID, podID, rateAgreementID, docID interface{}
-
-		if event.Invoice.ShipmentID != "" || event.ShipmentID != "" {
-			shpKey := event.Invoice.ShipmentID
-			if shpKey == "" {
-				shpKey = event.ShipmentID
-			}
-			var invRows []map[string]interface{}
-			pInv := url.Values{}
-			pInv.Set("shipment_id", "eq."+shpKey)
-			pInv.Set("limit", "1")
-			if err := r.dbClient.Query(ctx, "invoices", pInv, &invRows); err == nil && len(invRows) > 0 {
-				if v, ok := invRows[0]["id"].(string); ok && v != "" {
-					invoiceID = v
-				}
-				if v, ok := invRows[0]["document_id"].(string); ok && v != "" {
-					docID = v
-					if event.Invoice.DocumentID == "" {
-						event.Invoice.DocumentID = v
-					}
-				}
-			}
-
-			// Resolve FK: surat_jalan_id
-			var sjRows []map[string]interface{}
-			pSJ := url.Values{}
-			pSJ.Set("shipment_id", "eq."+shpKey)
-			pSJ.Set("limit", "1")
-			if err := r.dbClient.Query(ctx, "surat_jalans", pSJ, &sjRows); err == nil && len(sjRows) > 0 {
-				if v, ok := sjRows[0]["id"].(string); ok && v != "" {
-					suratJalanID = v
-				}
-			}
-
-			// Resolve FK: pod_id
-			var podRows []map[string]interface{}
-			pPOD := url.Values{}
-			pPOD.Set("shipment_id", "eq."+shpKey)
-			pPOD.Set("limit", "1")
-			if err := r.dbClient.Query(ctx, "pods", pPOD, &podRows); err == nil && len(podRows) > 0 {
-				if v, ok := podRows[0]["id"].(string); ok && v != "" {
-					podID = v
-				}
-			}
+		vendorID, err := r.ensureCanonicalVendor(ctx, event.VendorID, event.Invoice.VendorName)
+		if err != nil {
+			return err
 		}
-
-		// Resolve FK: rate_agreement_id by vendor_id
-		if event.VendorID != "" {
-			var raRows []map[string]interface{}
-			pRA := url.Values{}
-			pRA.Set("vendor_id", "eq."+event.VendorID)
-			pRA.Set("order", "created_at.desc")
-			pRA.Set("limit", "1")
-			if err := r.dbClient.Query(ctx, "rate_agreements", pRA, &raRows); err == nil && len(raRows) > 0 {
-				if v, ok := raRows[0]["id"].(string); ok && v != "" {
-					rateAgreementID = v
-				}
-			}
+		shipmentID, err := r.ensureCanonicalShipment(ctx, event, vendorID)
+		if err != nil {
+			return err
 		}
-
+		status := canonicalEventStatus(event.Reconciliation.Status)
 		payload := map[string]interface{}{
-			"id":                      event.EventID,
-			"event_id":                event.EventID,
-			"shipment_id":             event.ShipmentID,
-			"vendor_id":               event.VendorID,
-			"status":                  string(event.Reconciliation.Status),
-			"match_confidence":        event.MatchConfidence,
-			"expected_base_charge":    event.Pricing.ExpectedBaseCharge,
-			"expected_fuel_surcharge": event.Pricing.ExpectedFuelSurcharge,
-			"expected_total_charge":   event.Pricing.ExpectedTotalCharge,
-			"billed_total_charge":     event.Invoice.BilledAmount,
-			"difference_amount":       event.Pricing.DifferenceAmount,
-			"is_material":             event.Pricing.IsMaterial,
-			"calculation_trace":       event.Pricing.Trace.TraceLog,
-			"priority_score":          event.Reconciliation.PriorityScore,
-			"requires_human_review":   event.Reconciliation.RequiresHumanReview,
-			"invoice_id":              invoiceID,
-			"surat_jalan_id":          suratJalanID,
-			"pod_id":                  podID,
-			"rate_agreement_id":       rateAgreementID,
-			"document_id":             docID,
+			"id": event.EventID, "shipment_id": shipmentID, "event_type": "RECONCILIATION",
+			"status": status, "expected_amount": event.Pricing.ExpectedTotalCharge,
+			"billed_amount": event.Invoice.BilledAmount, "variance_amount": event.Pricing.DifferenceAmount,
+			"calculation_trace": map[string]interface{}{
+				"pricing": event.Pricing, "checks": event.Checks, "match_method": event.MatchMethod,
+				"match_confidence": event.MatchConfidence,
+			},
+			"requires_human_review": event.Reconciliation.RequiresHumanReview,
+			"is_released":           false, "created_at": time.Now().UTC(),
 		}
-
-		pEv := url.Values{}
-		pEv.Set("event_id", "eq."+event.EventID)
-		var existEv []map[string]interface{}
-		_ = r.dbClient.Query(ctx, "shipment_events", pEv, &existEv)
-		var savedEventID string
-		if len(existEv) > 0 {
-			var uOut []map[string]interface{}
-			_ = r.dbClient.Update(ctx, "shipment_events", pEv, payload, &uOut)
-			if v, ok := existEv[0]["id"].(string); ok {
-				savedEventID = v
-			}
-		} else {
-			var created []map[string]interface{}
-			_ = r.dbClient.Insert(ctx, "shipment_events", payload, &created)
-			if len(created) > 0 {
-				if v, ok := created[0]["id"].(string); ok {
-					savedEventID = v
-				}
-			}
-			if savedEventID == "" {
-				savedEventID = event.EventID
-			}
+		params := url.Values{"id": []string{"eq." + event.EventID}}
+		var existing []map[string]interface{}
+		if err := r.dbClient.Query(ctx, "shipment_events", params, &existing); err != nil {
+			return fmt.Errorf("check shipment event: %w", err)
 		}
-
-		// Auto-create reconciliation_case jika belum ada
-		r.EnsureReconciliationCase(ctx, savedEventID, event)
+		var saved []map[string]interface{}
+		if len(existing) > 0 {
+			if err := r.dbClient.Update(ctx, "shipment_events", params, payload, &saved); err != nil {
+				return fmt.Errorf("update shipment event: %w", err)
+			}
+		} else if err := r.dbClient.Insert(ctx, "shipment_events", payload, &saved); err != nil {
+			return fmt.Errorf("insert shipment event: %w", err)
+		}
+		r.EnsureReconciliationCase(ctx, event.EventID, event)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events[event.EventID] = event
 	return nil
+}
+
+func (r *ResourceDB) ensureCanonicalVendor(ctx context.Context, vendorID, vendorName string) (interface{}, error) {
+	if vendorID == "" {
+		return nil, nil
+	}
+	var rows []map[string]interface{}
+	params := url.Values{"vendor_id": []string{"eq." + vendorID}, "limit": []string{"1"}}
+	if err := r.dbClient.Query(ctx, "vendors", params, &rows); err != nil {
+		return nil, fmt.Errorf("lookup vendor: %w", err)
+	}
+	if len(rows) > 0 {
+		return rows[0]["id"], nil
+	}
+	if vendorName == "" {
+		vendorName = vendorID
+	}
+	payload := map[string]interface{}{"id": model.NewUUID(), "vendor_id": vendorID, "vendor_name": vendorName, "is_active": true}
+	if err := r.dbClient.Insert(ctx, "vendors", payload, &rows); err != nil {
+		return nil, fmt.Errorf("insert vendor: %w", err)
+	}
+	return payload["id"], nil
+}
+
+func (r *ResourceDB) ensureCanonicalShipment(ctx context.Context, event *model.ShipmentEvent, vendorID interface{}) (string, error) {
+	number := event.Shipment.ShipmentID
+	if number == "" {
+		number = event.ShipmentID
+	}
+	if number == "" {
+		return "", fmt.Errorf("shipment event has no shipment number")
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(number))
+	params := url.Values{"normalized_shipment_number": []string{"eq." + normalized}, "limit": []string{"1"}}
+	if vendorID != nil {
+		params.Set("vendor_id", "eq."+fmt.Sprint(vendorID))
+	}
+	var rows []map[string]interface{}
+	if err := r.dbClient.Query(ctx, "shipments", params, &rows); err != nil {
+		return "", fmt.Errorf("lookup shipment: %w", err)
+	}
+	if len(rows) > 0 {
+		return fmt.Sprint(rows[0]["id"]), nil
+	}
+	payload := map[string]interface{}{
+		"id": model.NewUUID(), "shipment_number": number, "normalized_shipment_number": normalized,
+		"vendor_id": vendorID, "origin": event.Shipment.Origin, "destination": event.Shipment.Destination,
+		"shipment_date": nullableDate(event.Shipment.ShipmentDate),
+	}
+	if err := r.dbClient.Insert(ctx, "shipments", payload, &rows); err != nil {
+		return "", fmt.Errorf("insert shipment: %w", err)
+	}
+	return fmt.Sprint(payload["id"]), nil
+}
+
+func canonicalEventStatus(status model.ReconciliationStatus) string {
+	switch status {
+	case model.StatusMatch:
+		return "MATCH"
+	case model.StatusApproved:
+		return "APPROVED"
+	case model.StatusDisputed:
+		return "DISPUTED"
+	case model.StatusRejected:
+		return "REJECTED"
+	case model.StatusResolved:
+		return "RESOLVED"
+	case model.StatusInsufficientEvidence:
+		return "INSUFFICIENT_EVIDENCE"
+	default:
+		return "EXCEPTION"
+	}
+}
+
+func nullableDate(value string) interface{} {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	if _, err := time.Parse("2006-01-02", value); err != nil {
+		return nil
+	}
+	return value
+}
+
+func nullableUUID(value string) interface{} {
+	value = strings.TrimSpace(value)
+	if len(value) != 36 {
+		return nil
+	}
+	return value
+}
+
+func stringValue(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
+}
+
+func floatValue(value interface{}) float64 {
+	switch number := value.(type) {
+	case float64:
+		return number
+	case float32:
+		return float64(number)
+	case int:
+		return float64(number)
+	case int64:
+		return float64(number)
+	default:
+		return 0
+	}
+}
+
+func boolValue(value interface{}) bool {
+	result, _ := value.(bool)
+	return result
 }
 
 // EnsureReconciliationCase auto-creates a reconciliation_case if one does not exist for this event.
@@ -480,15 +526,14 @@ func (r *ResourceDB) EnsureReconciliationCase(ctx context.Context, eventUUID str
 
 	now := time.Now().UTC()
 	casePayload := map[string]interface{}{
-		"id":                     model.NewUUID(),
-		"case_id":                "CASE-" + strings.ToUpper(eventUUID[:8]),
-		"event_id":               eventUUID,
-		"vendor_id":              event.VendorID,
-		"status":                 caseStatus,
-		"priority_score":         event.Reconciliation.PriorityScore,
-		"financial_exposure_idr": event.Pricing.DifferenceAmount,
-		"created_at":             now,
-		"updated_at":             now,
+		"id":                 model.NewUUID(),
+		"case_number":        "CASE-" + strings.ToUpper(eventUUID[:8]),
+		"event_id":           eventUUID,
+		"status":             caseStatus,
+		"priority_score":     event.Reconciliation.PriorityScore,
+		"financial_exposure": event.Pricing.DifferenceAmount,
+		"created_at":         now,
+		"updated_at":         now,
 	}
 	var cOut []map[string]interface{}
 	if err := r.dbClient.Insert(ctx, "reconciliation_cases", casePayload, &cOut); err != nil {
@@ -500,13 +545,42 @@ func (r *ResourceDB) EnsureReconciliationCase(ctx context.Context, eventUUID str
 
 // rowToShipmentEvent converts a Supabase shipment_events row to model.ShipmentEvent with domain table lookups
 func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]interface{}) *model.ShipmentEvent {
-	evID, _ := row["event_id"].(string)
-	if evID == "" {
-		evID, _ = row["id"].(string)
-	}
+	// The canonical schema stores the reconciliation projection directly on the
+	// event row. Keep reads independent from the removed document-specific tables.
+	evID := stringValue(row["id"])
 	if evID == "" {
 		return nil
 	}
+	status := model.ReconciliationStatus(stringValue(row["status"]))
+	expected := int64(floatValue(row["expected_amount"]))
+	billed := int64(floatValue(row["billed_amount"]))
+	variance := int64(floatValue(row["variance_amount"]))
+	if canonicalSchemaRead(row) {
+		return &model.ShipmentEvent{
+			EventID:    evID,
+			ShipmentID: stringValue(row["shipment_id"]),
+			Reconciliation: model.ReconciliationDecision{
+				Status:              status,
+				RequiresHumanReview: boolValue(row["requires_human_review"]),
+			},
+			Pricing: model.PricingResult{
+				ExpectedTotalCharge: expected,
+				DifferenceAmount:    variance,
+			},
+			Invoice: model.InvoiceCanonical{BilledAmount: billed},
+		}
+	}
+
+	/*
+		evID, _ := row["event_id"].(string)
+		if evID == "" {
+			evID, _ = row["id"].(string)
+		}
+
+		if evID == "" {
+			return nil
+		}
+	*/
 
 	statusStr, _ := row["status"].(string)
 	shpID, _ := row["shipment_id"].(string)
@@ -529,7 +603,7 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 	}
 	traceStr, _ := row["calculation_trace"].(string)
 
-	status := model.ReconciliationStatus(statusStr)
+	status = model.ReconciliationStatus(statusStr)
 	if status == "" {
 		status = model.StatusMatch
 	}
@@ -754,34 +828,20 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 	}
 }
 
+func canonicalSchemaRead(row map[string]interface{}) bool {
+	return row != nil
+}
+
 // GetEventByID retrieves an event by EventID, ShipmentID, or InvoiceNumber
 func (r *ResourceDB) GetEventByID(ctx context.Context, id string) (*model.ShipmentEvent, error) {
 	ensureFieldEvidence := func(ev *model.ShipmentEvent) {
-		if ev == nil {
-			return
-		}
-		docID := ev.Invoice.DocumentID
-		if docID == "" {
-			docID = ev.ShipmentID
-		}
-		if len(ev.Invoice.FieldEvidence) == 0 {
-			ev.Invoice.FieldEvidence = r.loadFieldEvidence(ctx, docID)
-		}
-		if len(ev.Shipment.FieldEvidence) == 0 {
-			ev.Shipment.FieldEvidence = r.loadFieldEvidence(ctx, docID)
-		}
-		if len(ev.POD.FieldEvidence) == 0 {
-			ev.POD.FieldEvidence = r.loadFieldEvidence(ctx, docID)
-		}
-		if len(ev.Contract.FieldEvidence) == 0 {
-			ev.Contract.FieldEvidence = r.loadFieldEvidence(ctx, docID)
-		}
+		_ = ev
 	}
 
 	if r.dbClient != nil {
 		var results []map[string]interface{}
 		params := url.Values{}
-		params.Set("or", fmt.Sprintf("(id.eq.%s,event_id.eq.%s,shipment_id.eq.%s)", id, id, id))
+		params.Set("id", "eq."+id)
 		params.Set("limit", "1")
 
 		err := r.dbClient.Query(ctx, "shipment_events", params, &results)
@@ -829,10 +889,7 @@ func (r *ResourceDB) ListAllEvents(ctx context.Context) ([]*model.ShipmentEvent,
 			eventsList := make([]*model.ShipmentEvent, 0, len(dbRows))
 			r.mu.Lock()
 			for _, row := range dbRows {
-				evID, _ := row["event_id"].(string)
-				if evID == "" {
-					evID, _ = row["id"].(string)
-				}
+				evID := stringValue(row["id"])
 				if existing, ok := r.events[evID]; ok && existing != nil {
 					eventsList = append(eventsList, existing)
 					continue
@@ -867,10 +924,9 @@ func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision 
 
 	// Persist to Supabase audit_events and review_decisions
 	if r.dbClient != nil {
-		// Resolve UUID dari event (bisa berupa event_id string atau UUID)
-		var eventUUID string
+		eventUUID := eventID
 		params := url.Values{}
-		params.Set("or", fmt.Sprintf("(id.eq.%s,event_id.eq.%s,shipment_id.eq.%s)", eventID, eventID, eventID))
+		params.Set("id", "eq."+eventID)
 		params.Set("limit", "1")
 		var seRows []map[string]interface{}
 		if err := r.dbClient.Query(ctx, "shipment_events", params, &seRows); err == nil && len(seRows) > 0 {
@@ -898,13 +954,8 @@ func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision 
 		}
 
 		decisionPayload := map[string]interface{}{
-			"id":            model.NewUUID(),
-			"case_id":       nil, // diisi jika ada reconciliation_case
-			"action":        dbAction,
-			"reviewer_id":   decision.ActorID,
-			"reviewer_role": decision.ActorRole,
-			"reason":        decision.Notes,
-			"created_at":    now,
+			"id": model.NewUUID(), "action": dbAction, "reviewer_id": nullableUUID(decision.ActorID),
+			"reason": decision.Notes, "created_at": now,
 		}
 
 		// Cari case_id yang terkait
@@ -945,7 +996,7 @@ func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision 
 
 		// Update status in Supabase shipment_events
 		seParams := url.Values{}
-		seParams.Set("or", fmt.Sprintf("(id.eq.%s,event_id.eq.%s,shipment_id.eq.%s)", eventID, eventID, eventID))
+		seParams.Set("id", "eq."+eventUUID)
 		updatePayload := map[string]interface{}{
 			"status":                newStatus,
 			"requires_human_review": false,
@@ -957,37 +1008,11 @@ func (r *ResourceDB) SaveDecision(ctx context.Context, eventID string, decision 
 			fmt.Printf("[Supabase Update Success] Updated shipment_events for %s to %s\n", eventID, newStatus)
 		}
 
-		// Sync status_approval ke documents table
-		docApproval := "UNDER_REVIEW"
-		switch newStatus {
-		case "APPROVED", "RESOLVED", "MATCH":
-			docApproval = "ACCEPTED"
-		case "REJECTED":
-			docApproval = "REJECTED"
-		case "DISPUTE", "DISPUTED":
-			docApproval = "DISPUTED"
-		}
-		if ev, ok := r.events[eventID]; ok && ev.Invoice.DocumentID != "" {
-			docParams := url.Values{}
-			docParams.Set("id", "eq."+ev.Invoice.DocumentID)
-			var docOut []map[string]interface{}
-			_ = r.dbClient.Update(ctx, "documents", docParams, map[string]interface{}{
-				"status_approval": docApproval,
-				"updated_at":      now,
-			}, &docOut)
-		}
-
 		// Write to audit_events (append-only immutable ledger)
 		auditPayload := map[string]interface{}{
-			"id":              model.NewUUID(),
-			"event_id":        eventUUID,
-			"actor_id":        decision.ActorID,
-			"actor_role":      decision.ActorRole,
-			"action":          decision.Action,
-			"previous_status": previousStatus,
-			"new_status":      newStatus,
-			"notes":           decision.Notes,
-			"timestamp":       now,
+			"id": model.NewUUID(), "event_id": eventUUID, "actor_id": nullableUUID(decision.ActorID),
+			"action": decision.Action, "previous_status": previousStatus,
+			"new_status": newStatus, "notes": decision.Notes, "created_at": now,
 		}
 		var aOut []map[string]interface{}
 		if err := r.dbClient.Insert(ctx, "audit_events", auditPayload, &aOut); err != nil {
