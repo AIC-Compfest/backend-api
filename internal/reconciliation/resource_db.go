@@ -356,6 +356,9 @@ func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) 
 			"requires_human_review": event.Reconciliation.RequiresHumanReview,
 			"is_released":           false, "created_at": time.Now().UTC(),
 		}
+		if event.IngestBatchID != "" {
+			payload["ingest_batch_id"] = event.IngestBatchID
+		}
 		params := url.Values{"id": []string{"eq." + event.EventID}}
 		var existing []map[string]interface{}
 		if err := r.dbClient.Query(ctx, "shipment_events", params, &existing); err != nil {
@@ -557,8 +560,9 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 	variance := int64(floatValue(row["variance_amount"]))
 	if canonicalSchemaRead(row) {
 		return &model.ShipmentEvent{
-			EventID:    evID,
-			ShipmentID: stringValue(row["shipment_id"]),
+			EventID:       evID,
+			ShipmentID:    stringValue(row["shipment_id"]),
+			IngestBatchID: stringValue(row["ingest_batch_id"]),
 			Reconciliation: model.ReconciliationDecision{
 				Status:              status,
 				RequiresHumanReview: boolValue(row["requires_human_review"]),

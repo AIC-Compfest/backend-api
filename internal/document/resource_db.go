@@ -147,17 +147,20 @@ func (r *ResourceDB) Create(ctx context.Context, doc *Document) error {
 
 	if r.dbClient != nil {
 		payload := map[string]interface{}{
-			"id":              doc.ID,
-			"filename":        doc.Filename,
-			"file_size":       doc.FileSize,
-			"mime_type":       doc.MimeType,
-			"sha256_hash":     doc.Sha256Hash,
-			"storage_path":    doc.StoragePath,
-			"status":          normalizeDocumentStatus(doc.Status),
-			"page_count":      doc.PageCount,
-			"ingest_batch_id": doc.IngestBatchID,
-			"created_at":      doc.CreatedAt,
-			"updated_at":      doc.UpdatedAt,
+			"id":                        doc.ID,
+			"filename":                  doc.Filename,
+			"file_size":                 doc.FileSize,
+			"mime_type":                 doc.MimeType,
+			"sha256_hash":               doc.Sha256Hash,
+			"storage_path":              doc.StoragePath,
+			"status":                    normalizeDocumentStatus(doc.Status),
+			"page_count":                doc.PageCount,
+			"ingest_batch_id":           doc.IngestBatchID,
+			"status_approval":           doc.StatusApproval,
+			"classification":            doc.Classification,
+			"classification_confidence": doc.ClassificationConfidence,
+			"created_at":                doc.CreatedAt,
+			"updated_at":                doc.UpdatedAt,
 		}
 		var created []Document
 		err := r.dbClient.Insert(ctx, "documents", payload, &created)
@@ -182,8 +185,10 @@ func (r *ResourceDB) Create(ctx context.Context, doc *Document) error {
 func (r *ResourceDB) UpdateStatus(ctx context.Context, id string, status string, classification string, confidence float64) error {
 	now := time.Now().UTC()
 	payload := map[string]interface{}{
-		"status":     status,
-		"updated_at": now,
+		"status":                    status,
+		"classification":            classification,
+		"classification_confidence": confidence,
+		"updated_at":                now,
 	}
 
 	if r.dbClient != nil {
@@ -208,6 +213,14 @@ func (r *ResourceDB) UpdateStatus(ctx context.Context, id string, status string,
 // UpdateApprovalStatus updates the approval status of a document
 func (r *ResourceDB) UpdateApprovalStatus(ctx context.Context, id string, statusApproval string) error {
 	now := time.Now().UTC()
+	if r.dbClient != nil {
+		if err := r.dbClient.Update(ctx, "documents", url.Values{"id": []string{"eq." + id}}, map[string]interface{}{
+			"status_approval": statusApproval,
+			"updated_at":      now,
+		}, nil); err != nil {
+			return err
+		}
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -304,12 +317,21 @@ func (r *ResourceDB) InsertPage(ctx context.Context, p *DocumentPage) error {
 
 	if r.dbClient != nil {
 		payload := map[string]interface{}{
-			"id":          p.ID,
-			"document_id": p.DocumentID,
-			"page_number": p.PageNumber,
-			"width":       p.Width,
-			"height":      p.Height,
-			"created_at":  p.CreatedAt,
+			"id":               p.ID,
+			"document_id":      p.DocumentID,
+			"page_number":      p.PageNumber,
+			"width":            p.Width,
+			"height":           p.Height,
+			"ocr_text":         p.OCRText,
+			"ocr_confidence":   p.OCRConfidence,
+			"layout_json":      p.LayoutJSON,
+			"segment_id":       nullableUUID(p.SegmentID),
+			"ocr_result":       p.OCRResult,
+			"ocr_engine_used":  p.OCREngineUsed,
+			"page_width_pts":   p.PageWidthPts,
+			"page_height_pts":  p.PageHeightPts,
+			"ocr_completed_at": p.OCRCompletedAt,
+			"created_at":       p.CreatedAt,
 		}
 		_ = p
 
@@ -475,7 +497,9 @@ func (r *ResourceDB) InsertSegment(ctx context.Context, seg *DocumentSegment) er
 			"start_page":                seg.StartPage,
 			"end_page":                  seg.EndPage,
 			"classification_confidence": seg.ClassificationConfidence,
+			"classification_method":     seg.ClassificationMethod,
 			"extraction_status":         normalizeSegmentStatus(seg.ExtractionStatus),
+			"requires_human_review":     seg.RequiresHumanReview,
 			"created_at":                seg.CreatedAt,
 			"updated_at":                seg.CreatedAt,
 		}
@@ -709,7 +733,7 @@ func (r *ResourceDB) ReviewField(ctx context.Context, documentID string, request
 	var predictions []map[string]interface{}
 	if err := r.dbClient.Query(ctx, "ai_field_predictions", url.Values{
 		"id":     []string{"eq." + request.PredictionID},
-		"select": []string{"id,extraction_run_id,predicted_raw_text,evidence_page,evidence_bbox"},
+		"select": []string{"id,extraction_run_id,predicted_value,predicted_raw_text,evidence_page,evidence_bbox"},
 		"limit":  []string{"1"},
 	}, &predictions); err != nil {
 		return fmt.Errorf("load prediction: %w", err)
@@ -759,7 +783,9 @@ func (r *ResourceDB) ReviewField(ctx context.Context, documentID string, request
 	}[action]
 	finalValue := request.ReviewedValue
 	if action == "ACCEPT_PREDICTION" {
-		finalValue = nil
+		// An approval promotes the immutable predicted value.  It must not erase
+		// the value from the current decision projection.
+		finalValue = predictions[0]["predicted_value"]
 	}
 	finalRawText := stringValue(predictions[0]["predicted_raw_text"])
 	if finalValue != nil {
@@ -774,7 +800,31 @@ func (r *ResourceDB) ReviewField(ctx context.Context, documentID string, request
 	}, nil); err != nil {
 		return fmt.Errorf("update field decision: %w", err)
 	}
+	// Document-level approval is a projection of field-level human decisions;
+	// no model score can mark a document approved by itself.
+	_ = r.syncDocumentApprovalStatus(ctx, documentID)
 	return nil
+}
+
+func (r *ResourceDB) syncDocumentApprovalStatus(ctx context.Context, documentID string) error {
+	profile, err := r.GetProfile(ctx, documentID)
+	if err != nil || len(profile.Predictions) == 0 {
+		return err
+	}
+	for _, prediction := range profile.Predictions {
+		var decision map[string]interface{}
+		for _, candidate := range profile.Decisions {
+			if stringValue(candidate["prediction_id"]) == stringValue(prediction["id"]) {
+				decision = candidate
+				break
+			}
+		}
+		status := stringValue(decision["decision_status"])
+		if status != "APPROVED" && status != "CORRECTED" {
+			return r.UpdateApprovalStatus(ctx, documentID, "UNDER_REVIEW")
+		}
+	}
+	return r.UpdateApprovalStatus(ctx, documentID, "APPROVED")
 }
 
 // EnsureVendorExists checks if vendor_id is in vendors table, if not inserts it automatically
@@ -988,8 +1038,8 @@ func (r *ResourceDB) PersistAIResult(ctx context.Context, documentID, ingestBatc
 		if i < len(segmentIDs) {
 			segmentID = segmentIDs[i]
 		}
-		ml := map[string]interface{}{}
-		if i < len(result.Segments) {
+		ml := extraction.MLExtraction
+		if ml == nil {
 			ml = result.MLExtraction
 		}
 		if err := r.persistExtraction(ctx, runID, segmentID, extraction.DocumentType, extraction.ExtractedFields, ml, now); err != nil {
@@ -1109,12 +1159,9 @@ func (r *ResourceDB) persistExtraction(ctx context.Context, pipelineRunID, segme
 		if err := r.dbClient.Insert(ctx, "ai_prediction_candidate_scores", scorePayload, &out); err != nil {
 			return fmt.Errorf("insert candidate score for %s: %w", name, err)
 		}
+		// A model score is never a business approval.  Every generated mapping
+		// enters the HITL queue, including high-confidence LightGBM output.
 		decisionStatus := "PENDING_REVIEW"
-		if status == "ACCEPTED" && !boolValue(field["is_unknown"]) {
-			decisionStatus = "APPROVED"
-		} else if status == "UNKNOWN" {
-			decisionStatus = "UNKNOWN"
-		}
 
 		decisionPayload := map[string]interface{}{
 			"id": model.NewUUID(), "prediction_id": predictionID, "decision_status": decisionStatus,

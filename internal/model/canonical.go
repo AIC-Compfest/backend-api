@@ -329,6 +329,7 @@ type ShipmentEvent struct {
 	EventID         string                 `json:"event_id"`
 	ShipmentID      string                 `json:"shipment_id"`
 	VendorID        string                 `json:"vendor_id"`
+	IngestBatchID   string                 `json:"ingest_batch_id,omitempty"`
 	MatchMethod     MatchMethod            `json:"match_method"`
 	MatchConfidence float64                `json:"match_confidence"`
 	Invoice         InvoiceCanonical       `json:"invoice"`

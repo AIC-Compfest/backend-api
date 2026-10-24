@@ -100,6 +100,7 @@ type AISegmentExtraction struct {
 	PageCount                int                    `json:"page_count"`
 	ClassificationConfidence float64                `json:"classification_confidence"`
 	ExtractedFields          []model.ExtractedField `json:"extracted_fields"`
+	MLExtraction             map[string]interface{} `json:"ml_extraction,omitempty"`
 }
 
 // AIExtractionResult represents response from ai-service /v1/extract/pipeline/full
