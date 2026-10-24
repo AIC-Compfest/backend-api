@@ -134,6 +134,32 @@ func (r *ResourceDB) FindByID(ctx context.Context, id string) (*Document, error)
 	return doc, nil
 }
 
+// ListByIngestBatch returns the physical documents that form one user upload.
+// It is intentionally scoped by batch ID so finalization cannot accidentally
+// combine unrelated uploads merely because they share a vendor.
+func (r *ResourceDB) ListByIngestBatch(ctx context.Context, batchID string) ([]Document, error) {
+	if batchID == "" {
+		return nil, fmt.Errorf("ingest batch id is required")
+	}
+	if r.dbClient != nil {
+		var docs []Document
+		params := url.Values{"ingest_batch_id": []string{"eq." + batchID}, "order": []string{"created_at.asc"}}
+		if err := r.dbClient.Query(ctx, "documents", params, &docs); err != nil {
+			return nil, err
+		}
+		return docs, nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	docs := make([]Document, 0)
+	for _, id := range r.order {
+		if doc := r.memory[id]; doc != nil && doc.IngestBatchID == batchID {
+			docs = append(docs, *doc)
+		}
+	}
+	return docs, nil
+}
+
 // Create inserts a new document record into Supabase DB and local cache
 func (r *ResourceDB) Create(ctx context.Context, doc *Document) error {
 	if doc.ID == "" {
@@ -740,6 +766,15 @@ func (r *ResourceDB) ReviewField(ctx context.Context, documentID string, request
 	}
 	if len(predictions) == 0 {
 		return fmt.Errorf("prediction %q not found", request.PredictionID)
+	}
+	// An empty candidate is an explicit extraction failure, not something a
+	// reviewer can approve. Without this guard a `<nil>` value could be marked
+	// approved and later enter deterministic reconciliation as business data.
+	if action == "ACCEPT_PREDICTION" && isNilValue(predictions[0]["predicted_value"]) {
+		return fmt.Errorf("cannot approve an empty prediction; submit CORRECT_VALUE instead")
+	}
+	if action == "CORRECT_VALUE" && isNilValue(request.ReviewedValue) {
+		return fmt.Errorf("reviewed_value is required when correcting a prediction")
 	}
 	var extractions []map[string]interface{}
 	if err := r.dbClient.Query(ctx, "ai_extraction_runs", url.Values{

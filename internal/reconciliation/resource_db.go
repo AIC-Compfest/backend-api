@@ -77,16 +77,8 @@ func (r *ResourceDB) GetVendorName(ctx context.Context, vendorID string) string 
 		}
 	}
 
-	vendorMap := map[string]string{
-		"3PL-LOG-001": "PT Cepat Logistik Nusantara",
-		"3PL-LOG-002": "PT Trans Express Indonesia",
-		"3PL-LOG-003": "PT Kargo Andalan Utama",
-		"3PL-LOG-004": "PT Sinar Logistik Mandiri",
-		"3PL-LOG-005": "PT Aruna Freight Solusi",
-	}
-	if name, ok := vendorMap[vendorID]; ok {
-		return name
-	}
+	// Do not manufacture a partner name when master data is unavailable.  The
+	// vendor identifier remains the truthful, auditable display value.
 	return vendorID
 }
 
@@ -595,22 +587,13 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 	billedVal, _ := row["billed_total_charge"].(float64)
 	expectedVal, _ := row["expected_total_charge"].(float64)
 	expectedBaseVal, _ := row["expected_base_charge"].(float64)
-	if expectedBaseVal == 0 && expectedVal > 0 {
-		expectedBaseVal = expectedVal * 0.85
-	}
 	expectedFuelVal, _ := row["expected_fuel_surcharge"].(float64)
 	diffVal, _ := row["difference_amount"].(float64)
 	scoreVal, _ := row["priority_score"].(float64)
 	confVal, _ := row["match_confidence"].(float64)
-	if confVal == 0 {
-		confVal = 0.95
-	}
 	traceStr, _ := row["calculation_trace"].(string)
 
 	status = model.ReconciliationStatus(statusStr)
-	if status == "" {
-		status = model.StatusMatch
-	}
 
 	var discrepancies []model.DiscrepancyItem
 	if diffVal > 0 || status == model.StatusException {
@@ -623,59 +606,27 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 	}
 
 	vendorName := r.GetVendorName(ctx, vendorID)
-	now := time.Now()
 
 	inv := model.InvoiceCanonical{
-		InvoiceID:        shpID,
-		InvoiceNumber:    shpID,
-		InvoiceDate:      now.Format("2006-01-02"),
-		VendorID:         vendorID,
-		VendorName:       vendorName,
-		Origin:           "JAKARTA",
-		Destination:      "SURABAYA",
-		WeightBilledKg:   1250.0,
-		BaseChargeBilled: int64(billedVal / 1.11),
-		TaxBilled:        int64(billedVal - (billedVal / 1.11)),
-		BilledAmount:     int64(billedVal),
-		Currency:         "IDR",
-		FieldEvidence:    make(map[string]model.EvidenceSource),
+		VendorID:      vendorID,
+		VendorName:    vendorName,
+		BilledAmount:  int64(billedVal),
+		FieldEvidence: make(map[string]model.EvidenceSource),
 	}
 
 	shp := model.ShipmentCanonical{
-		SuratJalanNumber: "SJ-" + shpID,
-		ShipmentID:       shpID,
-		ServiceType:      "FTL Express Trucking",
-		ShipmentDate:     now.Format("2006-01-02"),
-		Origin:           "JAKARTA",
-		Destination:      "SURABAYA",
-		WeightActualKg:   1250.0,
-		TotalPackages:    25,
-		FieldEvidence:    make(map[string]model.EvidenceSource),
+		ShipmentID:    shpID,
+		FieldEvidence: make(map[string]model.EvidenceSource),
 	}
 
 	pod := model.PODCanonical{
-		PODNumber:           "POD-" + shpID,
-		ShipmentID:          shpID,
-		DeliveryStatus:      "DELIVERED",
-		DeliveryDate:        now.Format("2006-01-02"),
-		ReceiverName:        "Budi Santoso",
-		SignaturePresent:    true,
-		SignatureConfidence: 0.95,
-		StampPresent:        true,
-		FieldEvidence:       make(map[string]model.EvidenceSource),
+		ShipmentID:    shpID,
+		FieldEvidence: make(map[string]model.EvidenceSource),
 	}
 
 	ctr := model.ContractCanonical{
-		AgreementID:                    "RA-2026-JBODETABEK-001",
-		VendorID:                       vendorID,
-		EffectiveFrom:                  "2026-01-01",
-		EffectiveTo:                    "2026-12-31",
-		RateUnit:                       "PER_KG",
-		BaseRate:                       3500,
-		ApplicableFuelSurchargePercent: 5.0,
-		MinimumCharge:                  50000,
-		DisputeWindowDays:              14,
-		FieldEvidence:                  make(map[string]model.EvidenceSource),
+		VendorID:      vendorID,
+		FieldEvidence: make(map[string]model.EvidenceSource),
 	}
 
 	if r.dbClient != nil {

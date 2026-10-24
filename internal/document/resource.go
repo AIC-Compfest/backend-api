@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"backend-api/internal/model"
+	serviceRecon "backend-api/internal/service/reconciliation"
 	"backend-api/internal/storage"
 )
 
@@ -143,7 +144,7 @@ func NewResource(db *ResourceDB, store storage.Storage) *Resource {
 	return &Resource{
 		db:           db,
 		storage:      store,
-		aiServiceURL: "http://localhost:8100",
+		aiServiceURL: "",
 		aiHTTPClient: &http.Client{Timeout: 120 * time.Second},
 		aiTimeout:    120 * time.Second,
 	}
@@ -176,9 +177,9 @@ func (r *Resource) SetAIServiceTimeout(timeout time.Duration) {
 const MaxDocumentSizeBytes = 10 * 1024 * 1024 // 10 MB
 
 // extractViaAI calls Python FastAPI AI pipeline for deep OCR + structured extraction
-func (r *Resource) extractViaAI(ctx context.Context, filename string, fileBytes []byte) (*AIExtractionResult, error) {
+func (r *Resource) extractViaAI(ctx context.Context, filename, declaredDocumentType string, fileBytes []byte) (*AIExtractionResult, error) {
 	if r.aiServiceURL == "" {
-		r.aiServiceURL = "http://localhost:8100"
+		return nil, fmt.Errorf("AI_SERVICE_URL is not configured")
 	}
 	if r.aiHTTPClient == nil {
 		r.SetAIServiceTimeout(r.aiTimeout)
@@ -195,6 +196,11 @@ func (r *Resource) extractViaAI(ctx context.Context, filename string, fileBytes 
 	}
 	if _, err := part.Write(fileBytes); err != nil {
 		return nil, err
+	}
+	if normalizeDocumentType(declaredDocumentType) != "UNKNOWN" {
+		if err := writer.WriteField("document_type", normalizeDocumentType(declaredDocumentType)); err != nil {
+			return nil, err
+		}
 	}
 	if err := writer.Close(); err != nil {
 		return nil, err
@@ -256,8 +262,9 @@ func (r *Resource) extractViaAI(ctx context.Context, filename string, fileBytes 
 	return &result, nil
 }
 
-// Upload processes an uploaded multipart file, computes SHA-256, stores binary, runs AI extraction, and creates a live reconciliation event
-func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader, ingestBatchID string) (*UploadResponse, error) {
+// Upload processes a document into a reviewable AI mapping. Reconciliation is
+// intentionally deferred until the batch has received field-level approval.
+func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader, ingestBatchID, declaredDocumentType string) (*UploadResponse, error) {
 	if ingestBatchID == "" || !isUUID(ingestBatchID) {
 		ingestBatchID = model.NewUUID()
 	}
@@ -309,44 +316,48 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader,
 		}, nil
 	}
 
-	// 1. Store file in Supabase Storage
-	now := time.Now().UTC()
-	storagePath := fmt.Sprintf("invoices/%s_%s%s", now.Format("20060102"), hashStr[:12], ext)
-	if r.storage != nil {
-		_, _ = r.storage.Save(ctx, "documents-original", storagePath, bytes.NewReader(fileBytes))
+	// 1. Run the actual AI pipeline before creating a product record. A filename
+	// heuristic is not an extraction result and must never create an auditable
+	// document with fabricated confidence or empty mappings.
+	aiResult, aiErr := r.extractViaAI(ctx, fileHeader.Filename, declaredDocumentType, fileBytes)
+	if aiErr != nil {
+		return nil, fmt.Errorf("AI extraction failed; document was not accepted for review: %w", aiErr)
+	}
+	if aiResult == nil || !aiResult.ExtractionAttempted {
+		return nil, fmt.Errorf("AI extraction did not produce a reviewable mapping")
 	}
 
-	// 2. Initial Heuristic Classification
-	initialClass := "INVOICE"
-	initialConf := 0.95
-	lowerName := strings.ToLower(fileHeader.Filename)
-	if strings.Contains(lowerName, "sj") || strings.Contains(lowerName, "surat_jalan") || strings.Contains(lowerName, "do_") {
-		initialClass = "SURAT_JALAN"
-	} else if strings.Contains(lowerName, "pod") || strings.Contains(lowerName, "bukti") {
-		initialClass = "POD"
-	} else if strings.Contains(lowerName, "pks") || strings.Contains(lowerName, "rate") || strings.Contains(lowerName, "contract") {
-		initialClass = "RATE_AGREEMENT"
+	initialClass := normalizeDocumentType(declaredDocumentType)
+	initialConf := 0.0
+	if docType, ok := aiResult.Classification["document_type"].(string); ok && normalizeDocumentType(docType) != "UNKNOWN" {
+		initialClass = normalizeDocumentType(docType)
 	}
-
+	if initialClass == "UNKNOWN" {
+		return nil, fmt.Errorf("AI could not classify the document; select a supported document type and retry")
+	}
+	if conf, ok := aiResult.Classification["confidence"].(float64); ok && conf > 0 {
+		initialConf = conf
+	}
 	extractedFieldsMap := make(map[string]interface{})
+	for _, f := range aiResult.ExtractedFields {
+		if f.Value != nil {
+			extractedFieldsMap[f.Field] = f.Value
+		}
+	}
+	if len(extractedFieldsMap) == 0 && len(aiResult.SegmentExtractions) == 0 {
+		return nil, fmt.Errorf("AI extraction returned no fields; document was not accepted for approval")
+	}
 
-	// 3. Trigger Real AI Deep OCR & Extraction via Python FastAPI ai-service
-	aiResult, aiErr := r.extractViaAI(ctx, fileHeader.Filename, fileBytes)
-	if aiErr == nil && aiResult != nil {
-		if docType, ok := aiResult.Classification["document_type"].(string); ok && docType != "" && docType != "UNKNOWN" {
-			initialClass = docType
-		}
-		if conf, ok := aiResult.Classification["confidence"].(float64); ok && conf > 0 {
-			initialConf = conf
-		}
-		for _, f := range aiResult.ExtractedFields {
-			if f.Value != nil {
-				extractedFieldsMap[f.Field] = f.Value
-			}
+	// 2. Persist only the original file and AI output that passed the contract.
+	now := time.Now().UTC()
+	storagePath := fmt.Sprintf("documents/%s_%s%s", now.Format("20060102"), hashStr[:12], ext)
+	if r.storage != nil {
+		if _, err := r.storage.Save(ctx, "documents-original", storagePath, bytes.NewReader(fileBytes)); err != nil {
+			return nil, fmt.Errorf("store original document: %w", err)
 		}
 	}
 
-	// 4. Save metadata to Supabase DB public.documents
+	// 3. Save metadata to Supabase DB public.documents
 	pageCount := 1
 	if aiResult != nil && aiResult.PageCount > 0 {
 		pageCount = aiResult.PageCount
@@ -504,6 +515,10 @@ func (r *Resource) Upload(ctx context.Context, fileHeader *multipart.FileHeader,
 			_ = r.db.UpdateStatus(ctx, doc.ID, "FAILED", "", 0)
 			return nil, fmt.Errorf("failed to persist AI pipeline result: %w", err)
 		}
+		// Persist the exact OCR coordinates used by each mapping.  The evidence
+		// workspace overlays these boxes on the original stored document; it must
+		// never fall back to a rendered or synthetic proof sheet.
+		r.persistFieldEvidence(ctx, doc.ID, createdSegments, aiResult, now)
 	}
 
 	return &UploadResponse{
@@ -682,45 +697,26 @@ func extractCanonicalEntities(
 		return fallback
 	}
 
+	// Only persist facts returned by the extraction pipeline. Missing facts stay
+	// empty so the reconciliation engine can route the package to human review;
+	// it must never manufacture a financially plausible transaction.
 	// 1. Shared Keys
-	vendorName := cleanFieldStr(invFields, "vendor_name", "", cleanFieldStr(raFields, "vendor_name", "", "PT Cepat Logistik Nusantara"))
+	vendorName := cleanFieldStr(invFields, "vendor_name", "", cleanFieldStr(raFields, "vendor_name", "", ""))
 	vendorID := cleanFieldStr(invFields, "vendor_id", "3PL-LOG-", cleanFieldStr(raFields, "vendor_id", "3PL-LOG-", ""))
-	if vendorID == "" {
-		upper := strings.ToUpper(vendorName)
-		if strings.Contains(upper, "CEPAT") {
-			vendorID = "3PL-LOG-001"
-		} else if strings.Contains(upper, "TRANS") {
-			vendorID = "3PL-LOG-002"
-		} else if strings.Contains(upper, "KARGO") {
-			vendorID = "3PL-LOG-003"
-		} else if strings.Contains(upper, "SINAR") {
-			vendorID = "3PL-LOG-004"
-		} else if strings.Contains(upper, "ARUNA") {
-			vendorID = "3PL-LOG-005"
-		} else {
-			vendorID = "VND-" + strings.ToUpper(hashStr[:6])
-		}
-	}
 
-	shipmentID := cleanFieldStr(invFields, "shipment_id", "SHP-", cleanFieldStr(sjFields, "shipment_id", "SHP-", cleanFieldStr(podFields, "shipment_id", "SHP-", fmt.Sprintf("SHP-%s", hashStr[:8]))))
-	awbNumber := cleanFieldStr(invFields, "awb", "AWB-", cleanFieldStr(sjFields, "awb", "AWB-", cleanFieldStr(podFields, "awb", "AWB-", fmt.Sprintf("AWB-%s", hashStr[:8]))))
-	invNum := cleanFieldStr(invFields, "invoice_number", "INV-", strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename)))
+	shipmentID := cleanFieldStr(invFields, "shipment_id", "SHP-", cleanFieldStr(sjFields, "shipment_id", "SHP-", cleanFieldStr(podFields, "shipment_id", "SHP-", "")))
+	awbNumber := cleanFieldStr(invFields, "awb", "AWB-", cleanFieldStr(sjFields, "awb", "AWB-", cleanFieldStr(podFields, "awb", "AWB-", "")))
+	invNum := cleanFieldStr(invFields, "invoice_number", "INV-", "")
 
-	origin := cleanFieldStr(sjFields, "origin", "", cleanFieldStr(invFields, "origin", "", "JAKARTA"))
-	dest := cleanFieldStr(sjFields, "destination", "", cleanFieldStr(invFields, "destination", "", "SURABAYA"))
-	if strings.Contains(strings.ToUpper(dest), "SURABAYA") {
-		dest = "SURABAYA"
-	}
-	if strings.Contains(strings.ToUpper(origin), "JAKARTA") {
-		origin = "JAKARTA"
-	}
+	origin := cleanFieldStr(sjFields, "origin", "", cleanFieldStr(invFields, "origin", "", ""))
+	dest := cleanFieldStr(sjFields, "destination", "", cleanFieldStr(invFields, "destination", "", ""))
 
-	weightActual := getFloatVal(sjFields, "actual_weight_kg", getFloatVal(invFields, "actual_weight_kg", 1250.0))
+	weightActual := getFloatVal(sjFields, "actual_weight_kg", getFloatVal(invFields, "actual_weight_kg", 0))
 	weightBilled := getFloatVal(invFields, "weight_billed_kg", weightActual)
 
-	billedAmount := getInt64Val(invFields, "grand_total", getInt64Val(invFields, "billed_amount", 5544450))
-	subtotal := getInt64Val(invFields, "subtotal", int64(float64(billedAmount)/1.11))
-	taxAmount := getInt64Val(invFields, "tax_amount", billedAmount-subtotal)
+	billedAmount := getInt64Val(invFields, "grand_total", getInt64Val(invFields, "billed_amount", 0))
+	subtotal := getInt64Val(invFields, "subtotal", 0)
+	taxAmount := getInt64Val(invFields, "tax_amount", 0)
 
 	// Build Field Evidence from extractions
 	invEvidence := make(map[string]model.EvidenceSource)
@@ -781,77 +777,62 @@ func extractCanonicalEntities(
 		InvoiceNumber:    invNum,
 		ShipmentID:       shipmentID,
 		AWBNumber:        awbNumber,
-		InvoiceDate:      cleanFieldStr(invFields, "invoice_date", "", now.Format("2006-01-02")),
+		InvoiceDate:      cleanFieldStr(invFields, "invoice_date", "", ""),
 		VendorID:         vendorID,
 		VendorName:       vendorName,
 		Origin:           origin,
 		Destination:      dest,
-		ServiceType:      "FTL Express Trucking",
+		ServiceType:      cleanFieldStr(invFields, "service_type", "", ""),
 		WeightBilledKg:   weightBilled,
 		BaseChargeBilled: subtotal,
 		TaxBilled:        taxAmount,
 		BilledAmount:     billedAmount,
-		Currency:         cleanFieldStr(invFields, "currency", "", "IDR"),
+		Currency:         cleanFieldStr(invFields, "currency", "", ""),
 		DocumentID:       docID,
 		FieldEvidence:    invEvidence,
 	}
 
 	sjCanon := &model.ShipmentCanonical{
-		SuratJalanNumber: cleanFieldStr(sjFields, "surat_jalan_number", "SJ-", fmt.Sprintf("SJ-%s", hashStr[:8])),
+		SuratJalanNumber: cleanFieldStr(sjFields, "surat_jalan_number", "SJ-", ""),
 		ShipmentID:       shipmentID,
 		AWBNumber:        awbNumber,
-		ServiceType:      "FTL Express Trucking",
-		ShipmentDate:     cleanFieldStr(sjFields, "shipment_date", "", now.Format("2006-01-02")),
+		ServiceType:      cleanFieldStr(sjFields, "service_type", "", ""),
+		ShipmentDate:     cleanFieldStr(sjFields, "shipment_date", "", ""),
 		Origin:           origin,
 		Destination:      dest,
 		WeightActualKg:   weightActual,
-		TotalPackages:    int(getFloatVal(sjFields, "quantity", getFloatVal(sjFields, "total_packages", 25))),
+		TotalPackages:    int(getFloatVal(sjFields, "quantity", getFloatVal(sjFields, "total_packages", 0))),
 		DocumentID:       docID,
 		FieldEvidence:    sjEvidence,
 	}
 
 	podCanon := &model.PODCanonical{
-		PODNumber:           cleanFieldStr(podFields, "pod_number", "POD-", fmt.Sprintf("POD-%s", hashStr[:8])),
-		ShipmentID:          shipmentID,
-		AWBNumber:           awbNumber,
-		DeliveryStatus:      cleanFieldStr(podFields, "delivery_status", "", "DELIVERED"),
-		DeliveryDate:        cleanFieldStr(podFields, "delivery_date", "", now.Format("2006-01-02")),
-		ReceiverName:        cleanFieldStr(podFields, "receiver_name", "", "Budi Santoso"),
-		SignaturePresent:    true,
-		SignatureConfidence: 0.95,
-		StampPresent:        true,
-		DocumentID:          docID,
-		FieldEvidence:       podEvidence,
+		PODNumber:      cleanFieldStr(podFields, "pod_number", "POD-", ""),
+		ShipmentID:     shipmentID,
+		AWBNumber:      awbNumber,
+		DeliveryStatus: cleanFieldStr(podFields, "delivery_status", "", ""),
+		DeliveryDate:   cleanFieldStr(podFields, "delivery_date", "", ""),
+		ReceiverName:   cleanFieldStr(podFields, "receiver_name", "", ""),
+		DocumentID:     docID,
+		FieldEvidence:  podEvidence,
 	}
 
-	baseRate := int64(3500)
-	fuelPct := 5.0
-	disputeDays := int(getFloatVal(raFields, "dispute_window_days", 14))
-	if disputeDays <= 0 {
-		disputeDays = 14
-	}
+	baseRate := getInt64Val(raFields, "base_rate", 0)
+	fuelPct := getFloatVal(raFields, "fuel_surcharge_percent", 0)
+	disputeDays := int(getFloatVal(raFields, "dispute_window_days", 0))
 
 	ctrCanon := &model.ContractCanonical{
-		AgreementID:                    cleanFieldStr(raFields, "agreement_id", "RA-", "RA-2026-JBODETABEK-001"),
+		AgreementID:                    cleanFieldStr(raFields, "agreement_id", "RA-", ""),
 		VendorID:                       vendorID,
-		EffectiveFrom:                  cleanFieldStr(raFields, "effective_from", "", "2026-01-01"),
-		EffectiveTo:                    cleanFieldStr(raFields, "effective_to", "", "2026-12-31"),
-		RateUnit:                       "PER_KG",
+		EffectiveFrom:                  cleanFieldStr(raFields, "effective_from", "", ""),
+		EffectiveTo:                    cleanFieldStr(raFields, "effective_to", "", ""),
+		RateUnit:                       cleanFieldStr(raFields, "rate_unit", "", ""),
 		BaseRate:                       baseRate,
 		ApplicableFuelSurchargePercent: fuelPct,
-		MinimumCharge:                  50000,
+		MinimumCharge:                  getInt64Val(raFields, "minimum_charge", 0),
 		DisputeWindowDays:              disputeDays,
-		RateMatrix: []model.RateMatrixEntry{
-			{
-				OriginZone:      origin,
-				DestinationZone: dest,
-				ServiceType:     "FTL Express Trucking",
-				BaseRate:        baseRate,
-				RateType:        "PER_KG",
-			},
-		},
-		DocumentID:    docID,
-		FieldEvidence: raEvidence,
+		DocumentID:                     docID,
+		FieldEvidence:                  raEvidence,
 	}
 
 	return invCanon, sjCanon, podCanon, ctrCanon
@@ -933,19 +914,49 @@ func (r *Resource) RetryPage(ctx context.Context, id string, pageNumber int) (*D
 	return page, nil
 }
 
-// ReprocessDocument executes AI pipeline on already-uploaded document
+// ReprocessDocument executes the current AI pipeline against the original
+// stored binary. This is used for documents uploaded before a pipeline update.
 func (r *Resource) ReprocessDocument(ctx context.Context, id string) (*Document, error) {
 	doc, err := r.db.FindByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("document not found: %w", err)
 	}
-
-	doc.Status = "PROCESSING"
+	if r.storage == nil || doc.StoragePath == "" {
+		return nil, fmt.Errorf("original document is unavailable for reprocessing")
+	}
+	reader, err := r.storage.Open(ctx, doc.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("open original document: %w", err)
+	}
+	defer reader.Close()
+	bytes, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("read original document: %w", err)
+	}
 	_ = r.db.UpdateStatus(ctx, id, "PROCESSING", doc.Classification, doc.ClassificationConfidence)
-
+	result, err := r.extractViaAI(ctx, doc.Filename, doc.Classification, bytes)
+	if err != nil || result == nil || !result.ExtractionAttempted {
+		_ = r.db.UpdateStatus(ctx, id, "FAILED", doc.Classification, doc.ClassificationConfidence)
+		if err != nil {
+			return nil, fmt.Errorf("AI reprocessing failed: %w", err)
+		}
+		return nil, fmt.Errorf("AI reprocessing did not produce a reviewable mapping")
+	}
+	if len(result.ExtractedFields) == 0 && len(result.SegmentExtractions) == 0 {
+		_ = r.db.UpdateStatus(ctx, id, "FAILED", doc.Classification, doc.ClassificationConfidence)
+		return nil, fmt.Errorf("AI reprocessing returned no mapped fields")
+	}
+	if err := r.db.PersistAIResult(ctx, doc.ID, doc.IngestBatchID, doc.Filename, doc.Sha256Hash, doc.MimeType, result); err != nil {
+		_ = r.db.UpdateStatus(ctx, id, "FAILED", doc.Classification, doc.ClassificationConfidence)
+		return nil, fmt.Errorf("persist reprocessed AI result: %w", err)
+	}
+	segments, _ := r.db.ListSegments(ctx, id)
+	now := time.Now().UTC()
+	r.persistFieldEvidence(ctx, id, segments, result, now)
+	if err := r.db.UpdateStatus(ctx, id, "COMPLETED", doc.Classification, doc.ClassificationConfidence); err != nil {
+		return nil, err
+	}
 	doc.Status = "COMPLETED"
-	_ = r.db.UpdateStatus(ctx, id, "COMPLETED", doc.Classification, doc.ClassificationConfidence)
-
 	return doc, nil
 }
 
@@ -963,6 +974,84 @@ func (r *Resource) ReviewField(ctx context.Context, documentID string, request F
 		return nil, err
 	}
 	return r.db.GetProfile(ctx, documentID)
+}
+
+// FinalizeBatch runs the deterministic reconciliation engine only after every
+// extracted mapping in the upload batch has been explicitly approved or
+// corrected.  AI output is evidence; it never bypasses this gate.
+func (r *Resource) FinalizeBatch(ctx context.Context, batchID string) (*model.ShipmentEvent, error) {
+	if r.eventSink == nil {
+		return nil, fmt.Errorf("reconciliation service is not configured")
+	}
+	docs, err := r.db.ListByIngestBatch(ctx, batchID)
+	if err != nil {
+		return nil, fmt.Errorf("load batch documents: %w", err)
+	}
+	if len(docs) == 0 {
+		return nil, fmt.Errorf("upload batch %s has no documents", batchID)
+	}
+
+	combined := &AIExtractionResult{LogicalExtractions: map[string][]AIExtractedField{}}
+	firstDocID := docs[0].ID
+	for _, doc := range docs {
+		profile, profileErr := r.db.GetProfile(ctx, doc.ID)
+		if profileErr != nil {
+			return nil, fmt.Errorf("load mapping profile %s: %w", doc.Filename, profileErr)
+		}
+		if doc.StatusApproval != "APPROVED" || len(profile.Predictions) == 0 {
+			return nil, fmt.Errorf("document %q still requires mapping approval", doc.Filename)
+		}
+		final := make(map[string]map[string]interface{}, len(profile.Decisions))
+		for _, decision := range profile.Decisions {
+			status := stringValue(decision["decision_status"])
+			if status != "APPROVED" && status != "CORRECTED" {
+				return nil, fmt.Errorf("document %q has unresolved mapping", doc.Filename)
+			}
+			final[stringValue(decision["prediction_id"])] = decision
+		}
+		docType := normalizeDocumentType(doc.Classification)
+		if len(profile.Segments) > 0 {
+			docType = normalizeDocumentType(profile.Segments[0].DocumentType)
+		}
+		if docType == "UNKNOWN" {
+			return nil, fmt.Errorf("document %q has no resolved document type", doc.Filename)
+		}
+		for _, prediction := range profile.Predictions {
+			decision, ok := final[stringValue(prediction["id"])]
+			if !ok {
+				return nil, fmt.Errorf("document %q has a mapping without a final decision", doc.Filename)
+			}
+			value := decision["final_value"]
+			if value == nil {
+				value = prediction["predicted_value"]
+			}
+			if isNilValue(value) {
+				return nil, fmt.Errorf("document %q has an approved mapping with an empty value for %s", doc.Filename, stringValue(prediction["field_name"]))
+			}
+			combined.LogicalExtractions[docType] = append(combined.LogicalExtractions[docType], AIExtractedField{
+				Field: stringValue(prediction["field_name"]), Value: value,
+				Confidence: floatValue(prediction["score"]),
+				Source:     model.EvidenceSource{DocumentID: doc.ID, Page: int(floatValue(prediction["evidence_page"]))},
+			})
+		}
+	}
+
+	inv, shipment, pod, contract := extractCanonicalEntities(firstDocID, "", "", combined, nil, time.Now().UTC())
+	if shipment.ShipmentID == "" && shipment.AWBNumber == "" {
+		return nil, fmt.Errorf("batch has no transaction ID or resi to match Invoice, Surat Jalan, and POD")
+	}
+	// Rate Agreement is deliberately not matched by transaction ID. The engine
+	// receives its extracted vendor/route/validity facts as the contract input.
+	engine := serviceRecon.NewEngine()
+	event, err := engine.ReconcileTransaction(inv, shipment, pod, contract)
+	if err != nil {
+		return nil, fmt.Errorf("deterministic reconciliation failed: %w", err)
+	}
+	event.IngestBatchID = batchID
+	if err := r.eventSink.SaveEvent(ctx, event); err != nil {
+		return nil, fmt.Errorf("persist reconciliation event: %w", err)
+	}
+	return event, nil
 }
 
 // ListDocuments retrieves a paginated list of documents

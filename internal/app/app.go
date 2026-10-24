@@ -18,8 +18,6 @@ import (
 	"backend-api/internal/supabase"
 	"backend-api/internal/user"
 	userControllers "backend-api/internal/user/controllers"
-	"os"
-
 	"github.com/gin-gonic/gin"
 )
 
@@ -69,7 +67,7 @@ func New(cfg config.Config) *Application {
 	// 3. Domain Modular MVC Resources
 	// User Resource
 	userDB := user.NewResourceDB(dbClient)
-	userRes := user.NewResource(userDB, "aic-enterprise-auth-secret-key-2026")
+	userRes := user.NewResource(userDB, cfg.JWTSecret)
 
 	// Contract Resource
 	contractDB := contract.NewResourceDB(dbClient)
@@ -85,10 +83,6 @@ func New(cfg config.Config) *Application {
 
 	// Reconciliation Resource
 	reconDB := reconciliation.NewResourceDB(dbClient)
-	if os.Getenv("SEED_ON_STARTUP") == "true" {
-		_ = reconDB.SeedFromPilotDataset("../synthetic-data/dataset/v4_pilot_20")
-		_ = reconDB.SeedFromPilotDataset("d:/AIC/synthetic-data/dataset/v4_pilot_20")
-	}
 	reconRes := reconciliation.NewResource(reconDB, nil)
 	reconRes.SetStorage(store)
 

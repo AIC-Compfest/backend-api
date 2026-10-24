@@ -22,7 +22,7 @@ func Upload(res *document.Resource) gin.HandlerFunc {
 			return
 		}
 
-		resp, err := res.Upload(c.Request.Context(), fileHeader, c.PostForm("ingest_batch_id"))
+		resp, err := res.Upload(c.Request.Context(), fileHeader, c.PostForm("ingest_batch_id"), c.PostForm("document_type"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -69,6 +69,18 @@ func ReviewField(res *document.Resource) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, profile)
+	}
+}
+
+// FinalizeBatch advances a fully reviewed upload into deterministic matching.
+func FinalizeBatch(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		event, err := res.FinalizeBatch(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, event)
 	}
 }
 
@@ -137,6 +149,18 @@ func PipelineStatus(res *document.Resource) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, status)
+	}
+}
+
+// Reprocess re-runs the AI mapping on the original stored binary.
+func Reprocess(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		doc, err := res.ReprocessDocument(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, doc)
 	}
 }
 

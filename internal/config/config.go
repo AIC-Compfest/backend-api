@@ -18,6 +18,7 @@ type Config struct {
 	SupabasePublishableKey string
 	SupabaseServiceRoleKey string
 	AIServiceURL           string
+	JWTSecret              string
 	SchemaVersion          string
 	ConfigVersion          string
 	WorkerPollInterval     time.Duration
@@ -65,17 +66,30 @@ func Load() (Config, error) {
 		AppEnv:                 value("APP_ENV", "development"),
 		Port:                   value("PORT", "8080"),
 		LogLevel:               value("LOG_LEVEL", "INFO"),
-		SupabaseURL:            strings.TrimRight(value("SUPABASE_URL", "https://vqquelixcnzrylvvnzng.supabase.co"), "/"),
+		SupabaseURL:            strings.TrimRight(value("SUPABASE_URL", ""), "/"),
 		SupabasePublishableKey: value("SUPABASE_PUBLISHABLE_KEY", ""),
 		SupabaseServiceRoleKey: value("SUPABASE_SERVICE_ROLE_KEY", ""),
-		AIServiceURL:           strings.TrimRight(value("AI_SERVICE_URL", "http://localhost:8100"), "/"),
+		AIServiceURL:           strings.TrimRight(value("AI_SERVICE_URL", ""), "/"),
+		JWTSecret:              value("JWT_SECRET", ""),
 		SchemaVersion:          value("SCHEMA_VERSION", "0.1.0"),
 		ConfigVersion:          value("CONFIG_VERSION", "0.1.0"),
 		WorkerPollInterval:     time.Duration(pollSeconds) * time.Second,
 		AIServiceTimeout:       time.Duration(aiTimeoutSeconds) * time.Second,
 	}
+	if cfg.AIServiceURL == "" {
+		return Config{}, errors.New("AI_SERVICE_URL is required")
+	}
 	if _, err := url.ParseRequestURI(cfg.AIServiceURL); err != nil {
 		return Config{}, fmt.Errorf("AI_SERVICE_URL: %w", err)
+	}
+	if err := cfg.ValidateSupabase(); err != nil {
+		return Config{}, err
+	}
+	if cfg.SupabaseServiceRoleKey == "" {
+		return Config{}, errors.New("SUPABASE_SERVICE_ROLE_KEY is required")
+	}
+	if len(cfg.JWTSecret) < 32 {
+		return Config{}, errors.New("JWT_SECRET must be set and contain at least 32 characters")
 	}
 	return cfg, nil
 }
