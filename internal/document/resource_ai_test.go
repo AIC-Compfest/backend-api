@@ -51,7 +51,7 @@ func TestExtractViaAIUsesOfficialMultipartContractAndPreservesAdditiveMetadata(t
 	resource := NewResource(nil, nil)
 	resource.SetAIServiceURL(server.URL)
 	resource.SetAIServiceTimeout(2 * time.Second)
-	result, err := resource.extractViaAI(context.Background(), "invoice.pdf", []byte("pdf-bytes"))
+	result, err := resource.extractViaAI(context.Background(), "invoice.pdf", "", []byte("pdf-bytes"))
 	if err != nil {
 		t.Fatalf("extractViaAI: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestExtractViaAIRejectsNonSuccessHTTPResponsesWithBoundedBody(t *testing.T)
 
 	resource := NewResource(nil, nil)
 	resource.SetAIServiceURL(server.URL)
-	result, err := resource.extractViaAI(context.Background(), "large.pdf", []byte("bytes"))
+	result, err := resource.extractViaAI(context.Background(), "large.pdf", "", []byte("bytes"))
 	if result != nil || err == nil || !strings.Contains(err.Error(), "status=413") {
 		t.Fatalf("expected bounded 413 error, result=%v err=%v", result, err)
 	}

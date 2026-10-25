@@ -16,6 +16,7 @@ import (
 func TestPersistAIResultPersistsNoModelRunAsReviewableLineage(t *testing.T) {
 	var mu sync.Mutex
 	var tables []string
+	payloadsByTable := map[string][]map[string]interface{}{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		table := strings.TrimPrefix(r.URL.Path, "/rest/v1/")
 		mu.Lock()
@@ -29,6 +30,9 @@ func TestPersistAIResultPersistsNoModelRunAsReviewableLineage(t *testing.T) {
 		if r.Method == http.MethodPost {
 			var payload map[string]interface{}
 			_ = json.NewDecoder(r.Body).Decode(&payload)
+			mu.Lock()
+			payloadsByTable[table] = append(payloadsByTable[table], payload)
+			mu.Unlock()
 			if id, ok := payload["id"].(string); ok {
 				_, _ = w.Write([]byte(`[{"id":"` + id + `"}]`))
 				return
@@ -52,6 +56,16 @@ func TestPersistAIResultPersistsNoModelRunAsReviewableLineage(t *testing.T) {
 				Value:      "INV-TEST-001",
 				Confidence: 0.91,
 				Source:     model.EvidenceSource{Page: 1},
+			}, {
+				Field:      "unknown_field",
+				Value:      nil,
+				Confidence: 0,
+				IsUnknown:  true,
+				Source:     model.EvidenceSource{Page: 1},
+			}, {
+				Field: "low_confidence_suggestion", Value: "PO-TEST-0388", Confidence: 0.55,
+				RawText: "No Pesanan: PO-TEST-0388", ReviewStatus: "REVIEW", LowConfidence: true,
+				SourceKind: "rule", Source: model.EvidenceSource{Page: 1},
 			}},
 		}},
 		Pages:      []AIPageResult{{PageNumber: 1, PageImage: AIPageImage{Width: 100, Height: 100}}},
@@ -76,6 +90,56 @@ func TestPersistAIResultPersistsNoModelRunAsReviewableLineage(t *testing.T) {
 			t.Errorf("expected persistence to %s; calls=%v", table, tables)
 		}
 	}
+	var unknownPredictionID string
+	for _, table := range []string{"ai_field_candidates", "ai_field_predictions"} {
+		found := false
+		for _, payload := range payloadsByTable[table] {
+			if payload["field_name"] != "unknown_field" {
+				continue
+			}
+			found = true
+			if payload["parsed_value"] != nil || payload["predicted_value"] != nil || payload["final_value"] != nil {
+				t.Errorf("%s persisted an unknown field value: %#v", table, payload)
+			}
+			if payload["raw_text"] == "<nil>" || payload["predicted_raw_text"] == "<nil>" || payload["final_raw_text"] == "<nil>" {
+				t.Errorf("%s persisted the Go nil sentinel as raw text: %#v", table, payload)
+			}
+			if table == "ai_field_predictions" && (payload["prediction_status"] != "UNKNOWN" || payload["score"] != float64(0)) {
+				t.Errorf("unknown prediction should have UNKNOWN status and zero score: %#v", payload)
+			}
+			if table == "ai_field_predictions" {
+				unknownPredictionID, _ = payload["id"].(string)
+			}
+		}
+		if !found {
+			t.Errorf("expected an unknown_field payload in %s", table)
+		}
+	}
+	decisionFound := false
+	for _, payload := range payloadsByTable["ai_field_decisions"] {
+		if payload["prediction_id"] != unknownPredictionID {
+			continue
+		}
+		decisionFound = true
+		if payload["final_value"] != nil || payload["final_raw_text"] == "<nil>" || payload["final_raw_text"] != "" {
+			t.Errorf("unknown field decision should stay empty: %#v", payload)
+		}
+	}
+	if !decisionFound {
+		t.Errorf("expected a decision for the unknown prediction %q", unknownPredictionID)
+	}
+	for _, payload := range payloadsByTable["ai_field_predictions"] {
+		if payload["field_name"] == "low_confidence_suggestion" {
+			if payload["predicted_value"] != "PO-TEST-0388" || payload["prediction_status"] != "REVIEW" || payload["score"] != 0.55 {
+				t.Errorf("low-confidence suggestion was not preserved for review: %#v", payload)
+			}
+			if payload["predicted_raw_text"] != "PO-TEST-0388" {
+				t.Errorf("display text should be parsed value, raw source stays in metadata: %#v", payload)
+			}
+			return
+		}
+	}
+	t.Error("expected low-confidence suggestion prediction")
 }
 
 func contains(values []string, target string) bool {

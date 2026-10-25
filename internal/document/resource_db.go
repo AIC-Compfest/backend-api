@@ -721,8 +721,20 @@ func (r *ResourceDB) GetProfile(ctx context.Context, docID string) (*DocumentPro
 		return nil, fmt.Errorf("load profile predictions: %w", err)
 	}
 	profile.Predictions = predictions
+	documentTypes := make(map[string]string, len(extractions))
+	for _, extraction := range extractions {
+		documentTypes[stringValue(extraction["id"])] = stringValue(extraction["document_type"])
+	}
 	predictionIDs := make([]string, 0, len(predictions))
 	for _, prediction := range predictions {
+		docType := documentTypes[stringValue(prediction["extraction_run_id"])]
+		prediction["document_type"] = docType
+		prediction["registry_visible"] = isRegistryField(docType, stringValue(prediction["field_name"]))
+		metadata, _ := prediction["decoder_metadata"].(map[string]interface{})
+		prediction["review_status"] = valueOrDefault(stringValue(prediction["prediction_status"]), "UNKNOWN")
+		prediction["low_confidence"] = boolValue(metadata["low_confidence"])
+		prediction["source_kind"] = valueOrDefault(stringValue(metadata["source_kind"]), "rule")
+		prediction["alternatives"] = objectOrEmpty(metadata["alternatives"])
 		if id := stringValue(prediction["id"]); id != "" {
 			predictionIDs = append(predictionIDs, id)
 		}
@@ -759,7 +771,7 @@ func (r *ResourceDB) ReviewField(ctx context.Context, documentID string, request
 	var predictions []map[string]interface{}
 	if err := r.dbClient.Query(ctx, "ai_field_predictions", url.Values{
 		"id":     []string{"eq." + request.PredictionID},
-		"select": []string{"id,extraction_run_id,predicted_value,predicted_raw_text,evidence_page,evidence_bbox"},
+		"select": []string{"id,extraction_run_id,field_name,predicted_value,predicted_raw_text,evidence_page,evidence_bbox"},
 		"limit":  []string{"1"},
 	}, &predictions); err != nil {
 		return fmt.Errorf("load prediction: %w", err)
@@ -767,6 +779,7 @@ func (r *ResourceDB) ReviewField(ctx context.Context, documentID string, request
 	if len(predictions) == 0 {
 		return fmt.Errorf("prediction %q not found", request.PredictionID)
 	}
+	fieldName := stringValue(predictions[0]["field_name"])
 	// An empty candidate is an explicit extraction failure, not something a
 	// reviewer can approve. Without this guard a `<nil>` value could be marked
 	// approved and later enter deterministic reconciliation as business data.
@@ -779,13 +792,22 @@ func (r *ResourceDB) ReviewField(ctx context.Context, documentID string, request
 	var extractions []map[string]interface{}
 	if err := r.dbClient.Query(ctx, "ai_extraction_runs", url.Values{
 		"id":     []string{"eq." + stringValue(predictions[0]["extraction_run_id"])},
-		"select": []string{"pipeline_run_id"},
+		"select": []string{"pipeline_run_id,document_type"},
 		"limit":  []string{"1"},
 	}, &extractions); err != nil {
 		return fmt.Errorf("load extraction run: %w", err)
 	}
 	if len(extractions) == 0 {
 		return fmt.Errorf("extraction run for prediction not found")
+	}
+	docType := stringValue(extractions[0]["document_type"])
+	if !isRegistryField(docType, fieldName) {
+		return fmt.Errorf("field %q is not reviewable for document type %q", fieldName, docType)
+	}
+	if action == "CORRECT_VALUE" {
+		if err := validateReviewValue(predictions[0]["predicted_value"], request.ReviewedValue); err != nil {
+			return err
+		}
 	}
 	var runs []map[string]interface{}
 	if err := r.dbClient.Query(ctx, "ai_pipeline_runs", url.Values{
@@ -824,7 +846,7 @@ func (r *ResourceDB) ReviewField(ctx context.Context, documentID string, request
 	}
 	finalRawText := stringValue(predictions[0]["predicted_raw_text"])
 	if finalValue != nil {
-		finalRawText = fmt.Sprint(finalValue)
+		finalRawText = payloadSummary(finalValue)
 	}
 	if err := r.dbClient.Update(ctx, "ai_field_decisions", url.Values{
 		"prediction_id": []string{"eq." + request.PredictionID},
@@ -846,7 +868,12 @@ func (r *ResourceDB) syncDocumentApprovalStatus(ctx context.Context, documentID 
 	if err != nil || len(profile.Predictions) == 0 {
 		return err
 	}
+	visibleCount := 0
 	for _, prediction := range profile.Predictions {
+		if !boolValue(prediction["registry_visible"]) {
+			continue
+		}
+		visibleCount++
 		var decision map[string]interface{}
 		for _, candidate := range profile.Decisions {
 			if stringValue(candidate["prediction_id"]) == stringValue(prediction["id"]) {
@@ -858,6 +885,9 @@ func (r *ResourceDB) syncDocumentApprovalStatus(ctx context.Context, documentID 
 		if status != "APPROVED" && status != "CORRECTED" {
 			return r.UpdateApprovalStatus(ctx, documentID, "UNDER_REVIEW")
 		}
+	}
+	if visibleCount == 0 {
+		return r.UpdateApprovalStatus(ctx, documentID, "UNDER_REVIEW")
 	}
 	return r.UpdateApprovalStatus(ctx, documentID, "APPROVED")
 }
@@ -1145,44 +1175,85 @@ func (r *ResourceDB) persistExtraction(ctx context.Context, pipelineRunID, segme
 		}
 		info := mlFields[name]
 		score := clampConfidence(floatValue(field["confidence"]))
-		if info["score"] != nil {
+		if field["confidence"] == nil && info["score"] != nil {
 			score = clampConfidence(floatValue(info["score"]))
-		}
-		status := strings.ToUpper(stringValue(info["status"]))
-		if status == "" {
-			status = "UNKNOWN"
-		}
-		if status != "ACCEPTED" && status != "REVIEW" && status != "UNKNOWN" {
-			status = "UNKNOWN"
 		}
 		valueJSON, _ := json.Marshal(field["value"])
 		var value interface{}
 		_ = json.Unmarshal(valueJSON, &value)
-		rawText := stringValue(info["raw_text"])
-		if rawText == "" {
-			rawText = fmt.Sprint(field["value"])
+		isUnknown := isNilValue(value)
+		status := strings.ToUpper(stringValue(field["review_status"]))
+		if status == "" {
+			status = strings.ToUpper(stringValue(info["status"]))
+		}
+		if isUnknown {
+			status = "UNKNOWN"
+			score = 0
+		} else if status != "ACCEPTED" && status != "REVIEW" {
+			if score >= 0.9 {
+				status = "ACCEPTED"
+			} else {
+				status = "REVIEW"
+			}
+		}
+		if boolValue(field["is_unknown"]) && value == nil {
+			value = nil
+			status = "UNKNOWN"
+			score = 0
+		}
+		sourceRawText := stringValue(field["raw_text"])
+		if sourceRawText == "" {
+			sourceRawText = stringValue(info["raw_text"])
+		}
+		rawText := payloadSummary(value)
+		if value == nil {
+			rawText = ""
 		}
 		page := int(floatValue(info["page"]))
 		if page <= 0 {
+			if source, ok := field["source"].(map[string]interface{}); ok {
+				page = int(floatValue(source["page"]))
+			}
+		}
+		if page <= 0 {
 			page = 1
+		}
+		bbox := info["bbox_norm"]
+		if bbox == nil {
+			if source, ok := field["source"].(map[string]interface{}); ok {
+				if sourceBox, ok := source["bbox"].(map[string]interface{}); ok {
+					bbox = []interface{}{sourceBox["x1"], sourceBox["y1"], sourceBox["x2"], sourceBox["y2"]}
+				}
+			}
 		}
 		candidateID := model.NewUUID()
 		candidatePayload := map[string]interface{}{
 			"id": candidateID, "candidate_run_id": candidateRunID, "document_type": documentType,
 			"field_name": name, "candidate_type": "FIELD_VALUE", "page_number": page,
-			"raw_text": rawText, "parsed_value": value, "normalized_value": rawText,
-			"confidence": score, "bbox": info["bbox_norm"], "raw_candidate": objectOrEmpty(info),
+			"raw_text": sourceRawText, "parsed_value": value, "normalized_value": rawText,
+			"confidence": score, "bbox": bbox, "raw_candidate": objectOrEmpty(info),
 			"features": map[string]interface{}{}, "context": map[string]interface{}{}, "created_at": now,
 		}
 		if err := r.dbClient.Insert(ctx, "ai_field_candidates", candidatePayload, &out); err != nil {
 			return fmt.Errorf("insert candidate for %s: %w", name, err)
 		}
 		predictionID := model.NewUUID()
+		metadata := objectOrEmpty(field["decoder_metadata"])
+		if metadataMap, ok := metadata.(map[string]interface{}); ok {
+			metadataMap["source_raw_text"] = sourceRawText
+			metadataMap["review_status"] = status
+			metadataMap["low_confidence"] = boolValue(field["low_confidence"])
+			metadataMap["source_kind"] = valueOrDefault(stringValue(field["source_kind"]), "rule")
+			metadataMap["alternatives"] = arrayOrEmpty(field["alternatives"])
+			if len(info) > 0 {
+				metadataMap["ml"] = info
+			}
+		}
 		predictionPayload := map[string]interface{}{
 			"id": predictionID, "extraction_run_id": extractionRunID, "field_name": name,
 			"prediction_status": status, "predicted_value": value, "predicted_raw_text": rawText,
 			"score": score, "selected_candidate_id": candidateID, "evidence_page": page,
-			"evidence_bbox": info["bbox_norm"], "decoder_metadata": objectOrEmpty(info), "created_at": now,
+			"evidence_bbox": bbox, "decoder_metadata": metadata, "created_at": now,
 		}
 		if err := r.dbClient.Insert(ctx, "ai_field_predictions", predictionPayload, &out); err != nil {
 			return fmt.Errorf("insert prediction for %s: %w", name, err)
@@ -1201,7 +1272,7 @@ func (r *ResourceDB) persistExtraction(ctx context.Context, pipelineRunID, segme
 		decisionPayload := map[string]interface{}{
 			"id": model.NewUUID(), "prediction_id": predictionID, "decision_status": decisionStatus,
 			"final_value": value, "final_raw_text": rawText, "final_page": page,
-			"final_bbox": info["bbox_norm"], "created_at": now,
+			"final_bbox": bbox, "created_at": now,
 		}
 		if err := r.dbClient.Insert(ctx, "ai_field_decisions", decisionPayload, &out); err != nil {
 			return fmt.Errorf("insert field decision for %s: %w", name, err)
@@ -1360,6 +1431,81 @@ func objectOrEmpty(value interface{}) interface{} {
 		return map[string]interface{}{}
 	}
 	return value
+}
+
+func payloadSummary(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]interface{}:
+		if typed["kind"] == "table" {
+			headers, _ := typed["headers"].([]interface{})
+			rows, _ := typed["rows"].([]interface{})
+			pages, _ := typed["pages"].([]interface{})
+			page := 0
+			if len(pages) > 0 {
+				page = int(floatValue(pages[0]))
+			}
+			if page > 0 {
+				return fmt.Sprintf("Tabel p%d · %d baris × %d kolom", page, len(rows), len(headers))
+			}
+			return fmt.Sprintf("Tabel · %d baris × %d kolom", len(rows), len(headers))
+		}
+	case []interface{}:
+		if len(typed) > 0 {
+			if _, ok := typed[0].(map[string]interface{}); ok {
+				return fmt.Sprintf("%d baris", len(typed))
+			}
+		}
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func isRegistryField(documentType, fieldName string) bool {
+	for _, field := range FieldRegistry[documentType] {
+		if field.Name == fieldName {
+			return true
+		}
+	}
+	return false
+}
+
+func validateReviewValue(predicted, reviewed interface{}) error {
+	if scalar, ok := reviewed.(string); ok {
+		if len([]rune(scalar)) > 160 || strings.ContainsAny(scalar, "\r\n") {
+			return fmt.Errorf("scalar review values must be at most 160 characters and contain no newline")
+		}
+	}
+	prediction, isTable := predicted.(map[string]interface{})
+	if !isTable || prediction["kind"] != "table" {
+		return nil
+	}
+	value, ok := reviewed.(map[string]interface{})
+	if !ok || value["kind"] != "table" {
+		return fmt.Errorf("table corrections must preserve the structured table payload")
+	}
+	headers, _ := value["headers"].([]interface{})
+	rows, _ := value["rows"].([]interface{})
+	if len(headers) == 0 {
+		return fmt.Errorf("table corrections require headers")
+	}
+	for index, raw := range rows {
+		row, ok := raw.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("table row %d must be an object", index+1)
+		}
+		cells, ok := row["cells"].([]interface{})
+		if !ok || len(cells) != len(headers) {
+			return fmt.Errorf("table row %d must contain one cell per header", index+1)
+		}
+	}
+	return nil
 }
 
 func arrayOrEmpty(value interface{}) interface{} {

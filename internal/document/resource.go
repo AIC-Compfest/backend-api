@@ -998,16 +998,27 @@ func (r *Resource) FinalizeBatch(ctx context.Context, batchID string) (*model.Sh
 		if profileErr != nil {
 			return nil, fmt.Errorf("load mapping profile %s: %w", doc.Filename, profileErr)
 		}
-		if doc.StatusApproval != "APPROVED" || len(profile.Predictions) == 0 {
+		visibleCount := 0
+		for _, prediction := range profile.Predictions {
+			if boolValue(prediction["registry_visible"]) {
+				visibleCount++
+			}
+		}
+		if doc.StatusApproval != "APPROVED" || visibleCount == 0 {
 			return nil, fmt.Errorf("document %q still requires mapping approval", doc.Filename)
+		}
+		visiblePrediction := make(map[string]bool, len(profile.Predictions))
+		for _, prediction := range profile.Predictions {
+			visiblePrediction[stringValue(prediction["id"])] = boolValue(prediction["registry_visible"])
 		}
 		final := make(map[string]map[string]interface{}, len(profile.Decisions))
 		for _, decision := range profile.Decisions {
 			status := stringValue(decision["decision_status"])
-			if status != "APPROVED" && status != "CORRECTED" {
+			predictionID := stringValue(decision["prediction_id"])
+			if visiblePrediction[predictionID] && status != "APPROVED" && status != "CORRECTED" {
 				return nil, fmt.Errorf("document %q has unresolved mapping", doc.Filename)
 			}
-			final[stringValue(decision["prediction_id"])] = decision
+			final[predictionID] = decision
 		}
 		docType := normalizeDocumentType(doc.Classification)
 		if len(profile.Segments) > 0 {
@@ -1017,16 +1028,34 @@ func (r *Resource) FinalizeBatch(ctx context.Context, batchID string) (*model.Sh
 			return nil, fmt.Errorf("document %q has no resolved document type", doc.Filename)
 		}
 		for _, prediction := range profile.Predictions {
-			decision, ok := final[stringValue(prediction["id"])]
-			if !ok {
-				return nil, fmt.Errorf("document %q has a mapping without a final decision", doc.Filename)
+			if boolValue(prediction["registry_visible"]) {
+				decision, ok := final[stringValue(prediction["id"])]
+				if !ok {
+					return nil, fmt.Errorf("document %q has a mapping without a final decision", doc.Filename)
+				}
+				value := decision["final_value"]
+				if value == nil {
+					value = prediction["predicted_value"]
+				}
+				if isNilValue(value) {
+					return nil, fmt.Errorf("document %q has an approved mapping with an empty value for %s", doc.Filename, stringValue(prediction["field_name"]))
+				}
+				if err := validateReviewValue(prediction["predicted_value"], value); err != nil {
+					return nil, fmt.Errorf("document %q has an invalid mapping for %s: %w", doc.Filename, stringValue(prediction["field_name"]), err)
+				}
+				combined.LogicalExtractions[docType] = append(combined.LogicalExtractions[docType], AIExtractedField{
+					Field: stringValue(prediction["field_name"]), Value: value,
+					Confidence: floatValue(prediction["score"]),
+					Source:     model.EvidenceSource{DocumentID: doc.ID, Page: int(floatValue(prediction["evidence_page"]))},
+				})
+				continue
 			}
-			value := decision["final_value"]
-			if value == nil {
-				value = prediction["predicted_value"]
-			}
+			// Legacy fields stay persisted for current consumers but are not part
+			// of the registry-driven review. Pass their model values through as
+			// evidence without requiring a hidden reviewer decision.
+			value := prediction["predicted_value"]
 			if isNilValue(value) {
-				return nil, fmt.Errorf("document %q has an approved mapping with an empty value for %s", doc.Filename, stringValue(prediction["field_name"]))
+				continue
 			}
 			combined.LogicalExtractions[docType] = append(combined.LogicalExtractions[docType], AIExtractedField{
 				Field: stringValue(prediction["field_name"]), Value: value,

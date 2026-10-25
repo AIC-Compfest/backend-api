@@ -39,6 +39,12 @@ type ExtractedField struct {
 	Source           EvidenceSource   `json:"source"`
 	Method           ExtractionMethod `json:"method"`
 	IsUnknown        bool             `json:"is_unknown"`
+	RawText          string           `json:"raw_text,omitempty"`
+	ReviewStatus     string           `json:"review_status,omitempty"`
+	LowConfidence    bool             `json:"low_confidence,omitempty"`
+	SourceKind       string           `json:"source_kind,omitempty"`
+	Alternatives     []map[string]any `json:"alternatives,omitempty"`
+	DecoderMetadata  map[string]any   `json:"decoder_metadata,omitempty"`
 }
 
 // ExtractionResponse represents Phase 6 payload for a document.
