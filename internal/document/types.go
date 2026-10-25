@@ -10,11 +10,12 @@ type Document struct {
 	MimeType                 string     `json:"mime_type"`
 	Sha256Hash               string     `json:"sha256_hash"`
 	StoragePath              string     `json:"storage_path"`
-	Status                   string     `json:"status"` // PENDING, PROCESSING, COMPLETED, FAILED
+	Status                   string     `json:"status"`                    // PENDING, PROCESSING, COMPLETED, FAILED
 	StatusApproval           string     `json:"status_approval,omitempty"` // UNDER_REVIEW, ACCEPTED, REJECTED, DISPUTED
 	Classification           string     `json:"classification,omitempty"`
 	ClassificationConfidence float64    `json:"classification_confidence,omitempty"`
 	PageCount                int        `json:"page_count,omitempty"`
+	IngestBatchID            string     `json:"ingest_batch_id,omitempty"`
 	ErrorMessage             string     `json:"error_message,omitempty"`
 	CreatedAt                time.Time  `json:"created_at"`
 	UpdatedAt                *time.Time `json:"updated_at,omitempty"`
@@ -83,22 +84,46 @@ type PipelineStatusResponse struct {
 
 // UploadResponse payload
 type UploadResponse struct {
-	ID              string                 `json:"id"`
-	Filename        string                 `json:"filename"`
-	FileSize        int64                  `json:"file_size"`
-	MimeType        string                 `json:"mime_type"`
-	Sha256Hash      string                 `json:"sha256_hash"`
-	Classification  string                 `json:"classification"`
-	Status          string                 `json:"status"`
-	Confidence      float64                `json:"confidence"`
-	IsDuplicate     bool                   `json:"is_duplicate"`
-	PageCount       int                    `json:"page_count,omitempty"`
-	StorageURL      string                 `json:"storage_url,omitempty"`
-	SegmentsURL     string                 `json:"segments_url,omitempty"`
-	Segments        []DocumentSegment      `json:"segments,omitempty"`
-	ExtractedFields map[string]interface{} `json:"extracted_fields,omitempty"`
-	Pages           []DocumentPage         `json:"pages,omitempty"`
-	ReconEventID    string                 `json:"recon_event_id,omitempty"`
+	ID                   string                 `json:"id"`
+	Filename             string                 `json:"filename"`
+	FileSize             int64                  `json:"file_size"`
+	MimeType             string                 `json:"mime_type"`
+	Sha256Hash           string                 `json:"sha256_hash"`
+	Classification       string                 `json:"classification"`
+	Status               string                 `json:"status"`
+	Confidence           float64                `json:"confidence"`
+	IsDuplicate          bool                   `json:"is_duplicate"`
+	PageCount            int                    `json:"page_count,omitempty"`
+	StorageURL           string                 `json:"storage_url,omitempty"`
+	SegmentsURL          string                 `json:"segments_url,omitempty"`
+	Segments             []DocumentSegment      `json:"segments,omitempty"`
+	IngestBatchID        string                 `json:"ingest_batch_id,omitempty"`
+	ExtractedFields      map[string]interface{} `json:"extracted_fields,omitempty"`
+	Pages                []DocumentPage         `json:"pages,omitempty"`
+	TableGroups          []map[string]any       `json:"table_groups,omitempty"`
+	MLExtraction         map[string]any         `json:"ml_extraction,omitempty"`
+	ArithmeticValidation map[string]any         `json:"arithmetic_validation,omitempty"`
+	RequiresHumanReview  bool                   `json:"requires_human_review,omitempty"`
+	PipelineVersion      string                 `json:"pipeline_version,omitempty"`
+	ReconEventID         string                 `json:"recon_event_id,omitempty"`
+}
+
+type DocumentProfile struct {
+	Document    *Document                `json:"document"`
+	Pages       []DocumentPage           `json:"pages"`
+	Segments    []DocumentSegment        `json:"segments"`
+	Pipeline    map[string]interface{}   `json:"pipeline,omitempty"`
+	Evidence    []FieldEvidence          `json:"evidence"`
+	Predictions []map[string]interface{} `json:"predictions"`
+	Decisions   []map[string]interface{} `json:"decisions"`
+}
+
+type FieldReviewRequest struct {
+	PredictionID       string      `json:"prediction_id"`
+	Action             string      `json:"action"`
+	ReviewedValue      interface{} `json:"reviewed_value"`
+	Reason             string      `json:"reason"`
+	ReviewerExternalID string      `json:"reviewer_external_id"`
 }
 
 // Pagination metadata
@@ -114,4 +139,3 @@ type ListResponse struct {
 	Data       []Document `json:"data"`
 	Pagination Pagination `json:"pagination"`
 }
-

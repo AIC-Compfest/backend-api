@@ -132,6 +132,11 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 		}
 
 		vendorName := r.db.GetVendorName(ctx, ev.VendorID)
+		// Prefer ingest_batch_id already on the event row (canonical schema); fall back to document lookup.
+		ingestBatchID := ev.IngestBatchID
+		if ingestBatchID == "" {
+			ingestBatchID = r.db.GetDocumentBatchID(ctx, ev.Invoice.DocumentID)
+		}
 
 		items = append(items, QueueItemDTO{
 			EventID:        ev.EventID,
@@ -150,6 +155,7 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 			PrimaryDiscrepancy: topDiscrepancy,
 			TopDiscrepancy:     topDiscrepancy,
 			CreatedAt:          createdAtStr,
+			IngestBatchID:      ingestBatchID,
 		})
 	}
 

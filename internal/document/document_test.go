@@ -202,4 +202,3 @@ func TestDocument_SegmentsEndpoint(t *testing.T) {
 		t.Errorf("expected segment_number 1, got %d", segResp.Segments[0].SegmentNumber)
 	}
 }
-

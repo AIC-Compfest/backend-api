@@ -172,7 +172,7 @@ func (r *Resource) SubmitDecision(eventID string, req DecisionRequestDTO) (*mode
 
 	reviewerID := strings.TrimSpace(req.ReviewerID)
 	if reviewerID == "" {
-		reviewerID = "USER-AP-001"
+		return nil, fmt.Errorf("reviewer identity is required")
 	}
 
 	prevStatus := string(ev.Reconciliation.Status)
@@ -344,17 +344,17 @@ func (r *Resource) SeedFromDataset(datasetDir string) error {
 		}
 
 		inv := &model.InvoiceCanonical{
-			InvoiceID:        rawDoc.InvoiceID,
-			InvoiceNumber:    rawDoc.InvoiceID,
-			InvoiceDate:      rawDoc.ShipmentDate,
-			VendorID:         rawDoc.VendorID,
-			ServiceType:      rawDoc.ServiceType,
-			Origin:           rawDoc.Origin,
-			Destination:      rawDoc.Destination,
-			WeightBilledKg:   rawDoc.WeightKg,
-			BilledAmount:     rawDoc.BilledCharge,
-			TaxBilled:        rawDoc.TaxAmount,
-			Currency:         "IDR",
+			InvoiceID:      rawDoc.InvoiceID,
+			InvoiceNumber:  rawDoc.InvoiceID,
+			InvoiceDate:    rawDoc.ShipmentDate,
+			VendorID:       rawDoc.VendorID,
+			ServiceType:    rawDoc.ServiceType,
+			Origin:         rawDoc.Origin,
+			Destination:    rawDoc.Destination,
+			WeightBilledKg: rawDoc.WeightKg,
+			BilledAmount:   rawDoc.BilledCharge,
+			TaxBilled:      rawDoc.TaxAmount,
+			Currency:       "IDR",
 			FieldEvidence: map[string]model.EvidenceSource{
 				"billed_amount": {DocumentID: rawDoc.InvoiceID, Page: 1, BBox: &model.BoundingBox{X1: 0.65, Y1: 0.85, X2: 0.95, Y2: 0.90}},
 			},
@@ -370,8 +370,8 @@ func (r *Resource) SeedFromDataset(datasetDir string) error {
 			WeightActualKg:   rawDoc.WeightKg,
 			TotalPackages:    rawDoc.Quantity,
 			FieldEvidence: map[string]model.EvidenceSource{
-				"shipment_id":    {DocumentID: "SJ-" + rawDoc.ShipmentID, Page: 1, BBox: &model.BoundingBox{X1: 0.20, Y1: 0.15, X2: 0.50, Y2: 0.20}},
-				"weight_actual":  {DocumentID: "SJ-" + rawDoc.ShipmentID, Page: 1, BBox: &model.BoundingBox{X1: 0.60, Y1: 0.45, X2: 0.85, Y2: 0.50}},
+				"shipment_id":   {DocumentID: "SJ-" + rawDoc.ShipmentID, Page: 1, BBox: &model.BoundingBox{X1: 0.20, Y1: 0.15, X2: 0.50, Y2: 0.20}},
+				"weight_actual": {DocumentID: "SJ-" + rawDoc.ShipmentID, Page: 1, BBox: &model.BoundingBox{X1: 0.60, Y1: 0.45, X2: 0.85, Y2: 0.50}},
 			},
 		}
 
@@ -423,20 +423,7 @@ func (r *Resource) SeedFromDataset(datasetDir string) error {
 
 // GetVendorDisplayName maps 3PL code to corporate trading entity name.
 func GetVendorDisplayName(code string) string {
-	switch code {
-	case "3PL-LOG-001":
-		return "PT Cepat Logistik Nusantara"
-	case "3PL-LOG-002":
-		return "PT Trans Express Indonesia"
-	case "3PL-LOG-003":
-		return "PT Kargo Andalan Utama"
-	case "3PL-LOG-004":
-		return "PT Sinar Logistik Mandiri"
-	case "3PL-LOG-005":
-		return "PT Aruna Freight Solusi"
-	default:
-		return code
-	}
+	return code
 }
 
 // FormatIDR formats an integer IDR amount with thousand separators.

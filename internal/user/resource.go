@@ -53,9 +53,6 @@ type Resource struct {
 
 // NewResource creates a user Resource instance
 func NewResource(db *ResourceDB, jwtSecret string) *Resource {
-	if jwtSecret == "" {
-		jwtSecret = "aic-enterprise-auth-secret-key-2026"
-	}
 	return &Resource{
 		db:        db,
 		jwtSecret: []byte(jwtSecret),

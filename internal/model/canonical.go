@@ -32,24 +32,31 @@ type EvidenceSource struct {
 
 // ExtractedField is the canonical unit emitted by Phase 6 AI Pipeline.
 type ExtractedField struct {
-	Field      string           `json:"field"`
-	Value      any              `json:"value"`
-	Confidence float64          `json:"confidence"`
-	Source     EvidenceSource   `json:"source"`
-	Method     ExtractionMethod `json:"method"`
-	IsUnknown  bool             `json:"is_unknown"`
+	Field            string           `json:"field"`
+	Value            any              `json:"value"`
+	Confidence       float64          `json:"confidence"`
+	ConfidenceSource string           `json:"confidence_source,omitempty"`
+	Source           EvidenceSource   `json:"source"`
+	Method           ExtractionMethod `json:"method"`
+	IsUnknown        bool             `json:"is_unknown"`
+	RawText          string           `json:"raw_text,omitempty"`
+	ReviewStatus     string           `json:"review_status,omitempty"`
+	LowConfidence    bool             `json:"low_confidence,omitempty"`
+	SourceKind       string           `json:"source_kind,omitempty"`
+	Alternatives     []map[string]any `json:"alternatives,omitempty"`
+	DecoderMetadata  map[string]any   `json:"decoder_metadata,omitempty"`
 }
 
 // ExtractionResponse represents Phase 6 payload for a document.
 type ExtractionResponse struct {
-	DocumentID           string           `json:"document_id"`
-	DocumentType         string           `json:"document_type"`
-	Fields               []ExtractedField `json:"fields"`
-	OCREngineUsed        string           `json:"ocr_engine_used,omitempty"`
-	FallbackTriggered    bool             `json:"fallback_triggered,omitempty"`
-	Status               string           `json:"status"`
-	ErrorCode            string           `json:"error_code,omitempty"`
-	RequiresHumanReview  bool             `json:"requires_human_review"`
+	DocumentID          string           `json:"document_id"`
+	DocumentType        string           `json:"document_type"`
+	Fields              []ExtractedField `json:"fields"`
+	OCREngineUsed       string           `json:"ocr_engine_used,omitempty"`
+	FallbackTriggered   bool             `json:"fallback_triggered,omitempty"`
+	Status              string           `json:"status"`
+	ErrorCode           string           `json:"error_code,omitempty"`
+	RequiresHumanReview bool             `json:"requires_human_review"`
 }
 
 // Helper method to convert Fields list to map for fast lookup
@@ -67,10 +74,10 @@ func (r *ExtractionResponse) FieldMap() map[string]ExtractedField {
 
 // InvoiceCanonical represents extracted & normalized facts from 3PL Invoice.
 type InvoiceCanonical struct {
-	InvoiceID    string `json:"invoice_id"`
+	InvoiceID     string `json:"invoice_id"`
 	InvoiceNumber string `json:"invoice_number"`
-	LineNumber   int    `json:"line_number,omitempty"`
-	InvoiceDate  string `json:"invoice_date"` // YYYY-MM-DD
+	LineNumber    int    `json:"line_number,omitempty"`
+	InvoiceDate   string `json:"invoice_date"` // YYYY-MM-DD
 
 	// PRIMARY entity resolution keys (Level 1 matching — use these FIRST).
 	// Entity resolver MUST check these before falling back to InvoiceNumber.
@@ -78,8 +85,8 @@ type InvoiceCanonical struct {
 	ShipmentID string `json:"shipment_id,omitempty"`
 	AWBNumber  string `json:"awb_number,omitempty"`
 
-	VendorID    string `json:"vendor_id"`
-	VendorName  string `json:"vendor_name,omitempty"`
+	VendorID     string `json:"vendor_id"`
+	VendorName   string `json:"vendor_name,omitempty"`
 	CustomerName string `json:"customer_name,omitempty"`
 	ServiceType  string `json:"service_type,omitempty"`
 	Origin       string `json:"origin,omitempty"`
@@ -126,7 +133,7 @@ type PODCanonical struct {
 	PODNumber           string  `json:"pod_number"`
 	ShipmentID          string  `json:"shipment_id,omitempty"`
 	AWBNumber           string  `json:"awb_number,omitempty"`
-	DeliveryStatus      string  `json:"delivery_status"` // DELIVERED, PARTIALLY_DELIVERED, FAILED, RETURNED, MISSING
+	DeliveryStatus      string  `json:"delivery_status"`         // DELIVERED, PARTIALLY_DELIVERED, FAILED, RETURNED, MISSING
 	DeliveryDate        string  `json:"delivery_date,omitempty"` // YYYY-MM-DD
 	ReceiverName        string  `json:"receiver_name,omitempty"`
 	QuantityReceived    *int    `json:"quantity_received,omitempty"`
@@ -204,31 +211,31 @@ type DiscrepancyCode string
 
 const (
 	// Pricing
-	CodeRateOvercharge          DiscrepancyCode = "RATE_OVERCHARGE"
-	CodeWrongWeightTier         DiscrepancyCode = "WRONG_WEIGHT_TIER"
-	CodeWrongZone               DiscrepancyCode = "WRONG_ZONE"
-	CodeWrongFuelSurcharge      DiscrepancyCode = "WRONG_FUEL_SURCHARGE"
-	CodeWrongAccessorial        DiscrepancyCode = "WRONG_ACCESSORIAL"
-	CodeUnauthorizedFee         DiscrepancyCode = "UNAUTHORIZED_FEE"
-	CodeMinimumChargeViolated   DiscrepancyCode = "MINIMUM_CHARGE_VIOLATED"
-	CodeUnapprovedSurcharge     DiscrepancyCode = "UNAPPROVED_SURCHARGE"
-	CodeTaxCalculationError     DiscrepancyCode = "TAX_CALCULATION_ERROR"
+	CodeRateOvercharge        DiscrepancyCode = "RATE_OVERCHARGE"
+	CodeWrongWeightTier       DiscrepancyCode = "WRONG_WEIGHT_TIER"
+	CodeWrongZone             DiscrepancyCode = "WRONG_ZONE"
+	CodeWrongFuelSurcharge    DiscrepancyCode = "WRONG_FUEL_SURCHARGE"
+	CodeWrongAccessorial      DiscrepancyCode = "WRONG_ACCESSORIAL"
+	CodeUnauthorizedFee       DiscrepancyCode = "UNAUTHORIZED_FEE"
+	CodeMinimumChargeViolated DiscrepancyCode = "MINIMUM_CHARGE_VIOLATED"
+	CodeUnapprovedSurcharge   DiscrepancyCode = "UNAPPROVED_SURCHARGE"
+	CodeTaxCalculationError   DiscrepancyCode = "TAX_CALCULATION_ERROR"
 
 	// Shipment
-	CodeShipmentNotFound        DiscrepancyCode = "SHIPMENT_NOT_FOUND"
-	CodeSuratJalanMissing       DiscrepancyCode = "SURAT_JALAN_MISSING"
-	CodeDuplicateShipment       DiscrepancyCode = "DUPLICATE_SHIPMENT"
-	CodeWrongDestination        DiscrepancyCode = "WRONG_DESTINATION"
-	CodeWrongWeight             DiscrepancyCode = "WRONG_WEIGHT"
-	CodeVolumeWeightMismatch    DiscrepancyCode = "VOLUME_WEIGHT_MISMATCH"
-	CodeWrongService            DiscrepancyCode = "WRONG_SERVICE"
-	CodeQuantityMismatch        DiscrepancyCode = "QUANTITY_MISMATCH"
+	CodeShipmentNotFound     DiscrepancyCode = "SHIPMENT_NOT_FOUND"
+	CodeSuratJalanMissing    DiscrepancyCode = "SURAT_JALAN_MISSING"
+	CodeDuplicateShipment    DiscrepancyCode = "DUPLICATE_SHIPMENT"
+	CodeWrongDestination     DiscrepancyCode = "WRONG_DESTINATION"
+	CodeWrongWeight          DiscrepancyCode = "WRONG_WEIGHT"
+	CodeVolumeWeightMismatch DiscrepancyCode = "VOLUME_WEIGHT_MISMATCH"
+	CodeWrongService         DiscrepancyCode = "WRONG_SERVICE"
+	CodeQuantityMismatch     DiscrepancyCode = "QUANTITY_MISMATCH"
 
 	// Documentation
-	CodePODMissing            DiscrepancyCode = "POD_MISSING"
-	CodeSignatureMissing      DiscrepancyCode = "SIGNATURE_MISSING"
-	CodePODDateMismatch       DiscrepancyCode = "POD_DATE_MISMATCH"
-	CodeIncompleteDocument    DiscrepancyCode = "INCOMPLETE_DOCUMENT"
+	CodePODMissing         DiscrepancyCode = "POD_MISSING"
+	CodeSignatureMissing   DiscrepancyCode = "SIGNATURE_MISSING"
+	CodePODDateMismatch    DiscrepancyCode = "POD_DATE_MISMATCH"
+	CodeIncompleteDocument DiscrepancyCode = "INCOMPLETE_DOCUMENT"
 
 	// Temporal & Duplicate
 	CodeOutsideContractValidity DiscrepancyCode = "OUTSIDE_CONTRACT_VALIDITY"
@@ -236,9 +243,9 @@ const (
 	CodeDuplicateInvoice        DiscrepancyCode = "DUPLICATE_INVOICE"
 
 	// Confidence / Evidence Quality Gate
-	CodeInsufficientEvidence    DiscrepancyCode = "INSUFFICIENT_EVIDENCE"
-	CodeLowOCRConfidence        DiscrepancyCode = "LOW_OCR_CONFIDENCE"
-	CodeAmbiguousMatch          DiscrepancyCode = "AMBIGUOUS_MATCH"
+	CodeInsufficientEvidence DiscrepancyCode = "INSUFFICIENT_EVIDENCE"
+	CodeLowOCRConfidence     DiscrepancyCode = "LOW_OCR_CONFIDENCE"
+	CodeAmbiguousMatch       DiscrepancyCode = "AMBIGUOUS_MATCH"
 )
 
 // DiscrepancyItem represents one distinct discrepancy with evidence traceability.
@@ -325,19 +332,20 @@ type ReconciliationCheck struct {
 
 // ShipmentEvent represents the master canonical result (PRD §13, canonical_schema.json).
 type ShipmentEvent struct {
-	EventID                  string                 `json:"event_id"`
-	ShipmentID               string                 `json:"shipment_id"`
-	VendorID                 string                 `json:"vendor_id"`
-	MatchMethod              MatchMethod            `json:"match_method"`
-	MatchConfidence          float64                `json:"match_confidence"`
-	Invoice                  InvoiceCanonical       `json:"invoice"`
-	Shipment                 ShipmentCanonical      `json:"shipment"`
-	POD                      PODCanonical           `json:"pod"`
-	Contract                 ContractCanonical      `json:"contract"`
-	Pricing                  PricingResult          `json:"pricing"`
-	Reconciliation           ReconciliationDecision `json:"reconciliation"`
-	Checks                   []ReconciliationCheck  `json:"checks,omitempty"`
-	AuditTrail               []AuditTrailItem       `json:"audit_trail,omitempty"`
+	EventID         string                 `json:"event_id"`
+	ShipmentID      string                 `json:"shipment_id"`
+	VendorID        string                 `json:"vendor_id"`
+	IngestBatchID   string                 `json:"ingest_batch_id,omitempty"`
+	MatchMethod     MatchMethod            `json:"match_method"`
+	MatchConfidence float64                `json:"match_confidence"`
+	Invoice         InvoiceCanonical       `json:"invoice"`
+	Shipment        ShipmentCanonical      `json:"shipment"`
+	POD             PODCanonical           `json:"pod"`
+	Contract        ContractCanonical      `json:"contract"`
+	Pricing         PricingResult          `json:"pricing"`
+	Reconciliation  ReconciliationDecision `json:"reconciliation"`
+	Checks          []ReconciliationCheck  `json:"checks,omitempty"`
+	AuditTrail      []AuditTrailItem       `json:"audit_trail,omitempty"`
 }
 
 // ReconciliationDecision matches the reconciliation block in canonical_schema.json

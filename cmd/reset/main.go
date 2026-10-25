@@ -55,6 +55,8 @@ func main() {
 		// Level 4: Master rate agreements & vendors
 		"rate_agreements",
 		"vendors",
+		// Batch parents are cleared after documents because documents reference them.
+		"ingest_batches",
 	}
 
 	fmt.Println("\n1. Mengosongkan 20 tabel Supabase (Domain, Transaksi, Audit, Spasial BBox, Master Vendor)...")

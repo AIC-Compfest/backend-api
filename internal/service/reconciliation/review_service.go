@@ -114,15 +114,15 @@ func (s *ReviewService) SeedFromPilotDataset(datasetDir string) error {
 			TransactionID string  `json:"transaction_id"`
 			ScenarioName  string  `json:"scenario_name"`
 			ShipmentID    string  `json:"shipment_id"`
-			InvoiceID      string  `json:"invoice_id"`
-			VendorID       string  `json:"vendor_id"`
-			Origin         string  `json:"origin"`
-			Destination    string  `json:"destination"`
-			ServiceType    string  `json:"service_type"`
-			ShipmentDate   string  `json:"shipment_date"`
-			WeightKg       float64 `json:"weight_kg"`
-			Quantity       int     `json:"quantity"`
-			Contract       struct {
+			InvoiceID     string  `json:"invoice_id"`
+			VendorID      string  `json:"vendor_id"`
+			Origin        string  `json:"origin"`
+			Destination   string  `json:"destination"`
+			ServiceType   string  `json:"service_type"`
+			ShipmentDate  string  `json:"shipment_date"`
+			WeightKg      float64 `json:"weight_kg"`
+			Quantity      int     `json:"quantity"`
+			Contract      struct {
 				AgreementID      string  `json:"agreement_id"`
 				BaseRate         int64   `json:"base_rate"`
 				FuelSurchargePct float64 `json:"fuel_surcharge_percent"`
@@ -143,17 +143,17 @@ func (s *ReviewService) SeedFromPilotDataset(datasetDir string) error {
 		}
 
 		inv := &model.InvoiceCanonical{
-			InvoiceID:        gt.InvoiceID,
-			InvoiceNumber:    gt.InvoiceID,
-			InvoiceDate:      gt.ShipmentDate,
-			VendorID:         gt.VendorID,
-			ServiceType:      gt.ServiceType,
-			Origin:           gt.Origin,
-			Destination:      gt.Destination,
-			WeightBilledKg:   gt.WeightKg,
-			BilledAmount:     gt.BilledCharge,
-			TaxBilled:        gt.TaxAmount,
-			Currency:         "IDR",
+			InvoiceID:      gt.InvoiceID,
+			InvoiceNumber:  gt.InvoiceID,
+			InvoiceDate:    gt.ShipmentDate,
+			VendorID:       gt.VendorID,
+			ServiceType:    gt.ServiceType,
+			Origin:         gt.Origin,
+			Destination:    gt.Destination,
+			WeightBilledKg: gt.WeightKg,
+			BilledAmount:   gt.BilledCharge,
+			TaxBilled:      gt.TaxAmount,
+			Currency:       "IDR",
 			FieldEvidence: map[string]model.EvidenceSource{
 				"billed_amount": {DocumentID: gt.InvoiceID, Page: 1, BBox: &model.BoundingBox{X1: 0.65, Y1: 0.85, X2: 0.95, Y2: 0.90}},
 			},
@@ -174,8 +174,8 @@ func (s *ReviewService) SeedFromPilotDataset(datasetDir string) error {
 			WeightActualKg:   gt.WeightKg,
 			TotalPackages:    gt.Quantity,
 			FieldEvidence: map[string]model.EvidenceSource{
-				"shipment_id":    {DocumentID: "SJ-" + gt.ShipmentID, Page: 1, BBox: &model.BoundingBox{X1: 0.20, Y1: 0.15, X2: 0.50, Y2: 0.20}},
-				"weight_actual":  {DocumentID: "SJ-" + gt.ShipmentID, Page: 1, BBox: &model.BoundingBox{X1: 0.60, Y1: 0.45, X2: 0.85, Y2: 0.50}},
+				"shipment_id":   {DocumentID: "SJ-" + gt.ShipmentID, Page: 1, BBox: &model.BoundingBox{X1: 0.20, Y1: 0.15, X2: 0.50, Y2: 0.20}},
+				"weight_actual": {DocumentID: "SJ-" + gt.ShipmentID, Page: 1, BBox: &model.BoundingBox{X1: 0.60, Y1: 0.45, X2: 0.85, Y2: 0.50}},
 			},
 		}
 
@@ -383,7 +383,7 @@ func (s *ReviewService) SubmitDecision(eventID string, req DecisionRequest) (*mo
 
 	reviewerID := strings.TrimSpace(req.ReviewerID)
 	if reviewerID == "" {
-		reviewerID = "USER-AP-001"
+		return nil, fmt.Errorf("reviewer identity is required")
 	}
 
 	prevStatus := string(ev.Reconciliation.Status)
@@ -505,18 +505,5 @@ REVIEWER STATEMENT:
 }
 
 func getVendorDisplayName(code string) string {
-	switch code {
-	case "3PL-LOG-001":
-		return "PT Cepat Logistik Nusantara"
-	case "3PL-LOG-002":
-		return "PT Trans Express Indonesia"
-	case "3PL-LOG-003":
-		return "PT Kargo Andalan Utama"
-	case "3PL-LOG-004":
-		return "PT Sinar Logistik Mandiri"
-	case "3PL-LOG-005":
-		return "PT Aruna Freight Solusi"
-	default:
-		return code
-	}
+	return code
 }

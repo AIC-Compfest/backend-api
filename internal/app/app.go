@@ -18,8 +18,6 @@ import (
 	"backend-api/internal/supabase"
 	"backend-api/internal/user"
 	userControllers "backend-api/internal/user/controllers"
-	"os"
-
 	"github.com/gin-gonic/gin"
 )
 
@@ -36,7 +34,8 @@ func New(cfg config.Config) *Application {
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, Range")
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, Content-Range, Accept-Ranges")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
 
 		if c.Request.Method == "OPTIONS" {
@@ -68,7 +67,7 @@ func New(cfg config.Config) *Application {
 	// 3. Domain Modular MVC Resources
 	// User Resource
 	userDB := user.NewResourceDB(dbClient)
-	userRes := user.NewResource(userDB, "aic-enterprise-auth-secret-key-2026")
+	userRes := user.NewResource(userDB, cfg.JWTSecret)
 
 	// Contract Resource
 	contractDB := contract.NewResourceDB(dbClient)
@@ -84,10 +83,6 @@ func New(cfg config.Config) *Application {
 
 	// Reconciliation Resource
 	reconDB := reconciliation.NewResourceDB(dbClient)
-	if os.Getenv("SEED_ON_STARTUP") == "true" {
-		_ = reconDB.SeedFromPilotDataset("../synthetic-data/dataset/v4_pilot_20")
-		_ = reconDB.SeedFromPilotDataset("d:/AIC/synthetic-data/dataset/v4_pilot_20")
-	}
 	reconRes := reconciliation.NewResource(reconDB, nil)
 	reconRes.SetStorage(store)
 
@@ -96,6 +91,7 @@ func New(cfg config.Config) *Application {
 	docRes := document.NewResource(docDB, store)
 	docRes.SetEventSink(reconDB)
 	docRes.SetAIServiceURL(cfg.AIServiceURL)
+	docRes.SetAIServiceTimeout(cfg.AIServiceTimeout)
 
 	// 4. Register API v1 Modular Routes
 	v1 := router.Group("/api/v1")

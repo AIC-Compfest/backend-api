@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -44,7 +45,7 @@ func NewIngestionService(repo repository.DocumentRepository, store storage.Stora
 		repo:         repo,
 		store:        store,
 		aiServiceURL: strings.TrimRight(aiServiceURL, "/"),
-		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		httpClient:   &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -161,24 +162,44 @@ func (s *IngestionService) OpenDocumentStream(ctx context.Context, storagePath s
 	return s.store.Open(ctx, storagePath)
 }
 
-// triggerAIExtraction notifies ai-service about newly queued document
+// triggerAIExtraction dispatches the same multipart contract used by the active
+// document resource. It intentionally does not persist AI results: the legacy
+// ingestion service is not wired by the current app; backend persistence and
+// reconciliation remain owned by document.Resource.
 func (s *IngestionService) triggerAIExtraction(docID, storagePath, mimeType string) {
-	if s.aiServiceURL == "" {
+	if s.aiServiceURL == "" || s.store == nil {
 		return
 	}
-	// Best-effort background dispatch
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/api/v1/extract", s.aiServiceURL)
-	payload := fmt.Sprintf(`{"document_id":"%s","storage_path":"%s","mime_type":"%s"}`, docID, storagePath, mimeType)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(payload))
+	file, err := s.store.Open(ctx, storagePath)
 	if err != nil {
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	defer file.Close()
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", filepath.Base(storagePath))
+	if err != nil {
+		return
+	}
+	if _, err = io.Copy(part, file); err != nil {
+		return
+	}
+	if err = writer.Close(); err != nil {
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.aiServiceURL, "/")+"/v1/extract/pipeline/full", body)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Correlation-ID", "document:"+docID)
 	resp, err := s.httpClient.Do(req)
 	if err == nil && resp != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 16*1024))
 		_ = resp.Body.Close()
 	}
 }

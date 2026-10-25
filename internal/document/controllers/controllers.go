@@ -1,11 +1,15 @@
 package controllers
 
 import (
+	"bytes"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
+	"time"
 
 	"backend-api/internal/document"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,7 +22,7 @@ func Upload(res *document.Resource) gin.HandlerFunc {
 			return
 		}
 
-		resp, err := res.Upload(c.Request.Context(), fileHeader)
+		resp, err := res.Upload(c.Request.Context(), fileHeader, c.PostForm("ingest_batch_id"), c.PostForm("document_type"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -38,6 +42,45 @@ func Get(res *document.Resource) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, doc)
+	}
+}
+
+func Profile(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		profile, err := res.GetDocumentProfile(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, profile)
+	}
+}
+
+func ReviewField(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var request document.FieldReviewRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid review payload"})
+			return
+		}
+		profile, err := res.ReviewField(c.Request.Context(), c.Param("id"), request)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, profile)
+	}
+}
+
+// FinalizeBatch advances a fully reviewed upload into deterministic matching.
+func FinalizeBatch(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		event, err := res.FinalizeBatch(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, event)
 	}
 }
 
@@ -68,9 +111,31 @@ func Download(res *document.Resource) gin.HandlerFunc {
 		}
 		defer reader.Close()
 
-		c.Header("Content-Disposition", "inline; filename="+doc.Filename)
+		// Uploads are capped at MaxDocumentSizeBytes, so buffering is bounded.
+		// A seekable body lets ServeContent set Content-Length and honour Range (pdf.js).
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read stored document"})
+			return
+		}
+		c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": doc.Filename}))
 		c.Header("Content-Type", doc.MimeType)
-		_, _ = io.Copy(c.Writer, reader)
+		c.Header("Cache-Control", "private, max-age=300")
+		http.ServeContent(c.Writer, c.Request, doc.Filename, time.Time{}, bytes.NewReader(data))
+	}
+}
+
+// Evidence handles GET /api/v1/documents/:id/evidence?page=N
+func Evidence(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "0"))
+		rows, err := res.ListFieldEvidence(c.Request.Context(), id, page)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"document_id": id, "count": len(rows), "evidence": rows})
 	}
 }
 
@@ -84,6 +149,18 @@ func PipelineStatus(res *document.Resource) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, status)
+	}
+}
+
+// Reprocess re-runs the AI mapping on the original stored binary.
+func Reprocess(res *document.Resource) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		doc, err := res.ReprocessDocument(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, doc)
 	}
 }
 
@@ -154,4 +231,3 @@ func ListSegments(res *document.Resource) gin.HandlerFunc {
 		})
 	}
 }
-
