@@ -57,13 +57,7 @@ jobs:
           curl --fail-with-body -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/json" \
             https://api.github.com/repos/AIC-Compfest/infra/dispatches \
-            -d @- <<EOF
-            {
-              "event_type": "service-updated",
-              "client_payload": {
-                "backend_tag": "${{ github.sha }}"
-              }
-            }
-            EOF
+            -d '{"event_type":"service-updated","client_payload":{"backend_tag":"'"${{ github.sha }}"'"}}'
 
