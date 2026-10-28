@@ -63,7 +63,7 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 
 	// Support comma-separated statuses: e.g. "EXCEPTION,DUPLICATE,INSUFFICIENT_EVIDENCE"
 	allowedStatuses := map[string]bool{}
-	if filter.Status != "" {
+	if filter.Status != "" && !strings.EqualFold(strings.TrimSpace(filter.Status), "ANOMALI") {
 		for _, s := range strings.Split(filter.Status, ",") {
 			allowedStatuses[strings.ToUpper(strings.TrimSpace(s))] = true
 		}
@@ -83,7 +83,13 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 
 		statusStr := string(ev.Reconciliation.Status)
 
-		// Apply Filters — supports comma-separated statuses
+		// ANOMALI is a UI alias, not a persisted status. It includes only
+		// exception outcomes produced by deterministic reconciliation.
+		if strings.EqualFold(strings.TrimSpace(filter.Status), "ANOMALI") &&
+			statusStr != "EXCEPTION" && statusStr != "DUPLICATE" && statusStr != "INSUFFICIENT_EVIDENCE" {
+			continue
+		}
+		// Apply Filters — supports comma-separated explicit statuses.
 		if len(allowedStatuses) > 0 && !allowedStatuses[strings.ToUpper(statusStr)] {
 			continue
 		}
@@ -127,9 +133,6 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 		}
 
 		createdAtStr := ev.Invoice.InvoiceDate
-		if createdAtStr == "" {
-			createdAtStr = time.Now().Format("2006-01-02")
-		}
 
 		vendorName := r.db.GetVendorName(ctx, ev.VendorID)
 		// Prefer ingest_batch_id already on the event row (canonical schema); fall back to document lookup.
@@ -139,17 +142,17 @@ func (r *Resource) GetQueue(ctx context.Context, filter QueueFilter) (*QueueResp
 		}
 
 		items = append(items, QueueItemDTO{
-			EventID:        ev.EventID,
-			TransactionID:  ev.EventID,
-			ShipmentID:     ev.ShipmentID,
-			InvoiceNumber:  ev.Invoice.InvoiceNumber,
-			VendorID:       ev.VendorID,
-			VendorName:     vendorName,
-			BilledAmount:   billed,
-			ExpectedAmount: expected,
-			VarianceAmount: variance,
-			MatchScore:     ev.MatchConfidence,
-			PriorityScore:  ev.Reconciliation.PriorityScore,
+			EventID:            ev.EventID,
+			TransactionID:      ev.EventID,
+			ShipmentID:         ev.ShipmentID,
+			InvoiceNumber:      ev.Invoice.InvoiceNumber,
+			VendorID:           ev.VendorID,
+			VendorName:         vendorName,
+			BilledAmount:       billed,
+			ExpectedAmount:     expected,
+			VarianceAmount:     variance,
+			MatchScore:         ev.MatchConfidence,
+			PriorityScore:      ev.Reconciliation.PriorityScore,
 			Status:             statusStr,
 			Severity:           severity,
 			PrimaryDiscrepancy: topDiscrepancy,

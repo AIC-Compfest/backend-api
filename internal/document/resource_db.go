@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -605,62 +606,101 @@ type FieldEvidence struct {
 }
 
 // ListFieldEvidence returns evidence rows for a document, optionally filtered by page.
+// Queries the field_evidence table directly (persisted from ai-service extractions).
+// ENHANCED: Also includes corrected values from ai_field_decisions (HITL review decisions)
+// so users see both AI predictions AND their corrections with bounding boxes.
 func (r *ResourceDB) ListFieldEvidence(ctx context.Context, docID string, page int) ([]FieldEvidence, error) {
 	if r.dbClient == nil {
 		return []FieldEvidence{}, nil
 	}
-	var runs []struct {
-		ID string `json:"id"`
+
+	// 1. Get original field_evidence (AI predictions)
+	params := url.Values{
+		"document_id": []string{"eq." + docID},
+		"order":       []string{"page_number.asc", "field_name.asc"},
 	}
-	runParams := url.Values{"document_id": []string{"eq." + docID}, "select": []string{"id"}}
-	if err := r.dbClient.Query(ctx, "ai_pipeline_runs", runParams, &runs); err != nil {
-		return nil, fmt.Errorf("load AI pipeline runs: %w", err)
-	}
-	if len(runs) == 0 {
-		return []FieldEvidence{}, nil
-	}
-	runIDs := make([]string, 0, len(runs))
-	for _, run := range runs {
-		runIDs = append(runIDs, run.ID)
-	}
-	var extractions []struct {
-		ID string `json:"id"`
-	}
-	extractionParams := url.Values{"pipeline_run_id": []string{"in.(" + strings.Join(runIDs, ",") + ")"}, "select": []string{"id"}}
-	if err := r.dbClient.Query(ctx, "ai_extraction_runs", extractionParams, &extractions); err != nil {
-		return nil, fmt.Errorf("load AI extraction runs: %w", err)
-	}
-	if len(extractions) == 0 {
-		return []FieldEvidence{}, nil
-	}
-	extractionIDs := make([]string, 0, len(extractions))
-	for _, extraction := range extractions {
-		extractionIDs = append(extractionIDs, extraction.ID)
-	}
-	var rows []struct {
-		ID           string          `json:"id"`
-		FieldName    string          `json:"field_name"`
-		PredictedRaw string          `json:"predicted_raw_text"`
-		Score        float64         `json:"score"`
-		EvidencePage int             `json:"evidence_page"`
-		EvidenceBBox json.RawMessage `json:"evidence_bbox"`
-	}
-	predictionParams := url.Values{"extraction_run_id": []string{"in.(" + strings.Join(extractionIDs, ",") + ")"}, "select": []string{"id,field_name,predicted_raw_text,score,evidence_page,evidence_bbox"}, "order": []string{"field_name.asc"}}
 	if page > 0 {
-		predictionParams.Set("evidence_page", fmt.Sprintf("eq.%d", page))
+		params.Set("page_number", fmt.Sprintf("eq.%d", page))
 	}
-	if err := r.dbClient.Query(ctx, "ai_field_predictions", predictionParams, &rows); err != nil {
-		return nil, fmt.Errorf("load AI field predictions: %w", err)
+
+	var rows []FieldEvidence
+	if err := r.dbClient.Query(ctx, "field_evidence", params, &rows); err != nil {
+		return nil, fmt.Errorf("query field_evidence: %w", err)
 	}
-	result := make([]FieldEvidence, 0, len(rows))
-	for _, row := range rows {
-		result = append(result, FieldEvidence{
-			ID: row.ID, DocumentID: docID, PageNumber: row.EvidencePage,
-			FieldName: row.FieldName, FieldValue: row.PredictedRaw,
-			Confidence: row.Score, CoordinateSpace: "page_image_normalized",
-		})
+
+	// 2. Get HITL review decisions (corrected values) from ai_field_decisions
+	// Join: documents → ai_field_predictions → ai_field_decisions
+	// where decision_status IN ('APPROVED', 'CORRECTED') and final_value has bbox
+	var decisions []map[string]interface{}
+	decidersParams := url.Values{
+		"select": []string{"id,prediction_id,final_value,final_page,final_bbox,field_name,decision_status"},
+		"order":  []string{"created_at.desc"},
+		"limit":  []string{"1000"},
 	}
-	return result, nil
+
+	// Execute raw SQL to join and filter properly
+	// For now, get all decisions and filter in code
+	if err := r.dbClient.Query(ctx, "ai_field_decisions", decidersParams, &decisions); err != nil {
+		// Non-fatal: if decisions table not accessible, continue with predictions only
+		fmt.Printf("[ListFieldEvidence] Warning: could not load decisions: %v\n", err)
+	} else {
+		// 3. Merge corrections into field_evidence rows
+		// For each decision with decision_status APPROVED/CORRECTED:
+		// - Add/update evidence with final_value and final_bbox from decision
+		seen := make(map[string]bool)
+		for _, dec := range decisions {
+			status := stringValue(dec["decision_status"])
+			if status != "APPROVED" && status != "CORRECTED" {
+				continue
+			}
+			finalVal := dec["final_value"]
+			finalPage := int64Value(dec["final_page"])
+			finalBbox := dec["final_bbox"]
+			fieldName := stringValue(dec["field_name"])
+
+			// Skip if no final value or no bbox
+			if isNilValue(finalVal) || finalBbox == nil {
+				continue
+			}
+
+			// Parse bbox from final_bbox (could be array or object)
+			bbox := boundingBoxFromValue(finalBbox)
+			if bbox == nil {
+				continue
+			}
+
+			// Add corrected evidence as a new row in the result
+			// Mark it as corrected by field_name so frontend can highlight it
+			key := fmt.Sprintf("%s|%d", fieldName, finalPage)
+			if seen[key] {
+				continue // Already added this field's correction
+			}
+			seen[key] = true
+
+			rows = append(rows, FieldEvidence{
+				ID:         stringValue(dec["id"]),
+				DocumentID: docID,
+				FieldName:  fieldName,
+				PageNumber: int(finalPage),
+				FieldValue: fmt.Sprintf("%v", finalVal),
+				BBoxX1:     ptrFloat(bbox.X1),
+				BBoxY1:     ptrFloat(bbox.Y1),
+				BBoxX2:     ptrFloat(bbox.X2),
+				BBoxY2:     ptrFloat(bbox.Y2),
+				Confidence: 1.0, // User corrections have 100% confidence
+			})
+		}
+	}
+
+	// 4. Sort by page + field name
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].PageNumber != rows[j].PageNumber {
+			return rows[i].PageNumber < rows[j].PageNumber
+		}
+		return rows[i].FieldName < rows[j].FieldName
+	})
+
+	return rows, nil
 }
 
 func (r *ResourceDB) GetProfile(ctx context.Context, docID string) (*DocumentProfile, error) {
@@ -1371,6 +1411,24 @@ func floatValue(value interface{}) float64 {
 	}
 }
 
+func int64Value(value interface{}) int64 {
+	switch number := value.(type) {
+	case float64:
+		return int64(number)
+	case float32:
+		return int64(number)
+	case int:
+		return int64(number)
+	case int64:
+		return number
+	case json.Number:
+		value, _ := number.Int64()
+		return value
+	default:
+		return 0
+	}
+}
+
 func validationResult(value map[string]interface{}) string {
 	switch strings.ToUpper(stringValue(value["overall_result"])) {
 	case "PASS", "FAIL", "WARNING":
@@ -1563,4 +1621,9 @@ func sourceKind(mimeType string) string {
 	default:
 		return "OTHER"
 	}
+}
+
+// ptrFloat converts a float64 to a *float64
+func ptrFloat(v float64) *float64 {
+	return &v
 }

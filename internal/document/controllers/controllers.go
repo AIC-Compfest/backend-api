@@ -87,6 +87,19 @@ func FinalizeBatch(res *document.Resource) gin.HandlerFunc {
 // List handles GET /api/v1/documents
 func List(res *document.Resource) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Check if batch query parameter is provided
+		batch := c.Query("batch")
+		if batch != "" {
+			resp, err := res.ListDocumentsByBatch(c.Request.Context(), batch)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, resp)
+			return
+		}
+
+		// Otherwise, use pagination
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 		statusFilter := c.Query("status")

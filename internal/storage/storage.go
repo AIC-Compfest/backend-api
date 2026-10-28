@@ -134,20 +134,10 @@ func (s *SupabaseStorage) Save(ctx context.Context, bucket string, filename stri
 }
 
 func (s *SupabaseStorage) Open(ctx context.Context, storagePath string) (io.ReadCloser, error) {
-	if s.fallbackLocal != nil {
-		if rc, err := s.fallbackLocal.Open(ctx, storagePath); err == nil {
-			return rc, nil
-		}
-	}
-
-	if s.supabaseURL == "" || s.serviceRoleKey == "" {
-		if s.fallbackLocal != nil {
-			return s.fallbackLocal.Open(ctx, storagePath)
-		}
-		return nil, fmt.Errorf("storage not configured")
-	}
-
 	rawClean := strings.TrimPrefix(storagePath, "/")
+
+	// Build candidate paths for both Supabase and local storage
+	// This handles backwards compatibility for paths like "documents/..." vs "documents-original/..."
 	candidatePaths := []string{rawClean}
 
 	if !strings.HasPrefix(rawClean, "documents-original/") && !strings.HasPrefix(rawClean, "documents/") {
@@ -158,9 +148,23 @@ func (s *SupabaseStorage) Open(ctx context.Context, storagePath string) (io.Read
 		candidatePaths = append(candidatePaths, "documents/"+strings.TrimPrefix(rawClean, "documents-original/"))
 	}
 
+	// 1. Try local storage FIRST with all candidate paths
+	if s.fallbackLocal != nil {
+		for _, cPath := range candidatePaths {
+			if rc, err := s.fallbackLocal.Open(ctx, cPath); err == nil {
+				return rc, nil
+			}
+		}
+	}
+
+	// 2. If not in local, try Supabase
+	if s.supabaseURL == "" || s.serviceRoleKey == "" {
+		return nil, fmt.Errorf("document not found in local storage and supabase storage not configured")
+	}
+
 	var lastErr error
 	for _, cPath := range candidatePaths {
-		// 1. Try authenticated storage object endpoint
+		// Try authenticated storage object endpoint
 		authURL := fmt.Sprintf("%s/storage/v1/object/authenticated/%s", s.supabaseURL, cPath)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, authURL, nil)
 		if err == nil {
@@ -174,7 +178,7 @@ func (s *SupabaseStorage) Open(ctx context.Context, storagePath string) (io.Read
 			}
 		}
 
-		// 2. Try standard object endpoint
+		// Try standard object endpoint
 		stdURL := fmt.Sprintf("%s/storage/v1/object/%s", s.supabaseURL, cPath)
 		if req2, err := http.NewRequestWithContext(ctx, http.MethodGet, stdURL, nil); err == nil {
 			req2.Header.Set("Authorization", "Bearer "+s.serviceRoleKey)
@@ -184,21 +188,15 @@ func (s *SupabaseStorage) Open(ctx context.Context, storagePath string) (io.Read
 					return resp2.Body, nil
 				}
 				resp2.Body.Close()
-				lastErr = fmt.Errorf("failed to fetch from supabase storage: HTTP %d", resp2.StatusCode)
+				lastErr = fmt.Errorf("failed to fetch from supabase storage: HTTP %d (path=%s)", resp2.StatusCode, cPath)
 			}
-		}
-	}
-
-	if s.fallbackLocal != nil {
-		if rc, err := s.fallbackLocal.Open(ctx, storagePath); err == nil {
-			return rc, nil
 		}
 	}
 
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("document storage object not found in supabase or local cache")
+	return nil, fmt.Errorf("document storage object not found in supabase or local cache (tried paths: %v)", candidatePaths)
 }
 
 func (s *SupabaseStorage) Delete(ctx context.Context, storagePath string) error {

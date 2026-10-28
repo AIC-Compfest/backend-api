@@ -52,7 +52,9 @@ func NewResourceDB(dbClient *database.Client) *ResourceDB {
 // GetVendorName queries vendors table first, then rate_agreements as fallback
 func (r *ResourceDB) GetVendorName(ctx context.Context, vendorID string) string {
 	if vendorID == "" {
-		return "Vendor 3PL"
+		// A display label without a canonical vendor is fabricated data. Return
+		// empty and let the API expose the missing master-data condition plainly.
+		return ""
 	}
 	if r.dbClient != nil {
 		// Try vendors table first (canonical master data)
@@ -337,6 +339,10 @@ func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) 
 			return err
 		}
 		status := canonicalEventStatus(event.Reconciliation.Status)
+		canonicalEvent, err := eventProjection(event)
+		if err != nil {
+			return fmt.Errorf("serialize canonical reconciliation event: %w", err)
+		}
 		payload := map[string]interface{}{
 			"id": event.EventID, "shipment_id": shipmentID, "event_type": "RECONCILIATION",
 			"status": status, "expected_amount": event.Pricing.ExpectedTotalCharge,
@@ -344,6 +350,7 @@ func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) 
 			"calculation_trace": map[string]interface{}{
 				"pricing": event.Pricing, "checks": event.Checks, "match_method": event.MatchMethod,
 				"match_confidence": event.MatchConfidence,
+				"canonical_event":  canonicalEvent,
 			},
 			"requires_human_review": event.Reconciliation.RequiresHumanReview,
 			"is_released":           false, "created_at": time.Now().UTC(),
@@ -364,6 +371,27 @@ func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) 
 		} else if err := r.dbClient.Insert(ctx, "shipment_events", payload, &saved); err != nil {
 			return fmt.Errorf("insert shipment event: %w", err)
 		}
+		// Persist the path back to the original upload, its logical segments and
+		// their approved field evidence. Review Query relies on this relationship.
+		if event.IngestBatchID != "" {
+			batchParams := url.Values{"ingest_batch_id": []string{"eq." + event.IngestBatchID}}
+			if err := r.dbClient.Update(ctx, "documents", batchParams, map[string]interface{}{"primary_event_id": event.EventID}, nil); err != nil {
+				return fmt.Errorf("link batch documents to reconciliation event: %w", err)
+			}
+			var batchDocuments []map[string]interface{}
+			if err := r.dbClient.Query(ctx, "documents", url.Values{"ingest_batch_id": []string{"eq." + event.IngestBatchID}, "select": []string{"id"}}, &batchDocuments); err != nil {
+				return fmt.Errorf("load batch documents for reconciliation linkage: %w", err)
+			}
+			for _, document := range batchDocuments {
+				docID := stringValue(document["id"])
+				if docID == "" {
+					continue
+				}
+				if err := r.dbClient.Update(ctx, "document_segments", url.Values{"document_id": []string{"eq." + docID}}, map[string]interface{}{"shipment_event_id": event.EventID}, nil); err != nil {
+					return fmt.Errorf("link document segments to reconciliation event: %w", err)
+				}
+			}
+		}
 		r.EnsureReconciliationCase(ctx, event.EventID, event)
 	}
 
@@ -371,6 +399,18 @@ func (r *ResourceDB) SaveEvent(ctx context.Context, event *model.ShipmentEvent) 
 	defer r.mu.Unlock()
 	r.events[event.EventID] = event
 	return nil
+}
+
+func eventProjection(event *model.ShipmentEvent) (map[string]interface{}, error) {
+	raw, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	var projection map[string]interface{}
+	if err := json.Unmarshal(raw, &projection); err != nil {
+		return nil, err
+	}
+	return projection, nil
 }
 
 func (r *ResourceDB) ensureCanonicalVendor(ctx context.Context, vendorID, vendorName string) (interface{}, error) {
@@ -551,6 +591,24 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 	billed := int64(floatValue(row["billed_amount"]))
 	variance := int64(floatValue(row["variance_amount"]))
 	if canonicalSchemaRead(row) {
+		if trace, ok := row["calculation_trace"].(map[string]interface{}); ok {
+			if projection, ok := trace["canonical_event"].(map[string]interface{}); ok {
+				raw, marshalErr := json.Marshal(projection)
+				if marshalErr == nil {
+					var event model.ShipmentEvent
+					if json.Unmarshal(raw, &event) == nil {
+						// Database identity/status is authoritative after a reviewer decision.
+						event.EventID = evID
+						event.IngestBatchID = stringValue(row["ingest_batch_id"])
+						event.Reconciliation.Status = status
+						event.Reconciliation.RequiresHumanReview = boolValue(row["requires_human_review"])
+						return &event
+					}
+				}
+			}
+		}
+		// Historical rows without this projection are intentionally limited; do
+		// not manufacture documents, evidence, or deterministic values.
 		return &model.ShipmentEvent{
 			EventID:       evID,
 			ShipmentID:    stringValue(row["shipment_id"]),
@@ -633,8 +691,12 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 		var invRows []map[string]interface{}
 		pInv := url.Values{}
 		pInv.Set("or", fmt.Sprintf("(shipment_id.eq.%s,invoice_number.eq.%s)", shpID, shpID))
-		pInv.Set("limit", "1")
+		pInv.Set("limit", "10")  // Fetch up to 10 invoices to handle multiple invoices per shipment
+		pInv.Set("order", "created_at.asc")
 		if err := r.dbClient.Query(ctx, "invoices", pInv, &invRows); err == nil && len(invRows) > 0 {
+			// Process all invoices, but use only the first one for the canonical event
+			// (the event model only has a single Invoice field, not a list)
+			// Multiple invoices will be preserved in the batch documents and field evidence
 			rInv := invRows[0]
 			if v, ok := rInv["invoice_number"].(string); ok && v != "" {
 				inv.InvoiceNumber = v
@@ -659,6 +721,10 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 				inv.DocumentID = docID
 				inv.FieldEvidence = r.loadFieldEvidence(ctx, docID)
 			}
+			
+			// NOTE: Multiple invoices detected - they should each be examined
+			// in batch finalization or a separate multiple-invoice reconciliation flow.
+			// For now, the first invoice is shown in the main event display.
 		}
 
 		var sjRows []map[string]interface{}
@@ -695,6 +761,7 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 			}
 			// Load real OCR BBox from field_evidence table for surat_jalan
 			if docID, ok := rSJ["document_id"].(string); ok && docID != "" {
+				shp.DocumentID = docID
 				shp.FieldEvidence = r.loadFieldEvidence(ctx, docID)
 			}
 		}
@@ -725,6 +792,7 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 			}
 			// Load real OCR BBox from field_evidence table for POD
 			if docID, ok := rPOD["document_id"].(string); ok && docID != "" {
+				pod.DocumentID = docID
 				pod.FieldEvidence = r.loadFieldEvidence(ctx, docID)
 			}
 		}
@@ -752,6 +820,11 @@ func (r *ResourceDB) rowToShipmentEvent(ctx context.Context, row map[string]inte
 			}
 			if v, ok := rRA["dispute_window_days"].(float64); ok && v > 0 {
 				ctr.DisputeWindowDays = int(v)
+			}
+			// Load real OCR BBox from field_evidence table for rate_agreement
+			if docID, ok := rRA["document_id"].(string); ok && docID != "" {
+				ctr.DocumentID = docID
+				ctr.FieldEvidence = r.loadFieldEvidence(ctx, docID)
 			}
 		}
 	}
