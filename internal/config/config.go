@@ -51,6 +51,19 @@ func loadDotEnv() {
 	}
 }
 
+func envOrSecret(envName, secretPath string) string {
+	if value := os.Getenv(envName); value != "" {
+		return value
+	}
+
+	data, err := os.ReadFile(secretPath)
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(data))
+}
+
 func Load() (Config, error) {
 	loadDotEnv()
 
@@ -68,9 +81,9 @@ func Load() (Config, error) {
 		LogLevel:               value("LOG_LEVEL", "INFO"),
 		SupabaseURL:            strings.TrimRight(value("SUPABASE_URL", ""), "/"),
 		SupabasePublishableKey: value("SUPABASE_PUBLISHABLE_KEY", ""),
-		SupabaseServiceRoleKey: value("SUPABASE_SERVICE_ROLE_KEY", ""),
+		SupabaseServiceRoleKey: envOrSecret("SUPABASE_SERVICE_ROLE_KEY", "/run/secrets/SUPABASE_SERVICE_ROLE_KEY"),
 		AIServiceURL:           strings.TrimRight(value("AI_SERVICE_URL", ""), "/"),
-		JWTSecret:              value("JWT_SECRET", ""),
+		JWTSecret:              envOrSecret("JWT_SECRET", "/run/secrets/JWT_SECRET"),
 		SchemaVersion:          value("SCHEMA_VERSION", "0.1.0"),
 		ConfigVersion:          value("CONFIG_VERSION", "0.1.0"),
 		WorkerPollInterval:     time.Duration(pollSeconds) * time.Second,
