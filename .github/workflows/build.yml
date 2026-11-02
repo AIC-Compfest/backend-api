@@ -49,10 +49,18 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      
+      - name: Create GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: AIC-Compfest
               
       - name: Notify infra repository
         env:
-          GH_TOKEN: ${{ secrets.INFRA_DEPLOY_TOKEN }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
         run: |
           curl --fail-with-body -X POST \
             -H "Accept: application/vnd.github+json" \
