@@ -215,6 +215,11 @@ func (r *Resource) extractViaAI(ctx context.Context, filename, declaredDocumentT
 	// The hash is stable for retries and lets ai-service correlate logs without
 	// making it responsible for business persistence or idempotency.
 	req.Header.Set("X-Correlation-ID", fmt.Sprintf("sha256:%x", sha256.Sum256(fileBytes)))
+	// Force asynchronous execution for long-running processing
+	req.Header.Set("X-Appwrite-Response-Format", "1.4.0")
+	req.Header.Set("X-Appwrite-Trigger", "http")
+	// Preserve HTTP Basic auth from AI_SERVICE_URL if embedded (e.g., https://user:pass@host)
+	// Go's http.Client extracts and uses it automatically via URL parsing
 
 	resp, err := r.aiHTTPClient.Do(req)
 	if err != nil {
