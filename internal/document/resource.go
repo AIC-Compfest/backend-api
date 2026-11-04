@@ -108,6 +108,9 @@ type AISegmentExtraction struct {
 type AIExtractionResult struct {
 	DocumentID            string                        `json:"document_id"`
 	Status                string                        `json:"status"`
+	JobID                 string                        `json:"job_id,omitempty"` // For async queue mode
+	Message               string                        `json:"message,omitempty"` // For async queue mode
+	EstimatedTimeSeconds  int                           `json:"estimated_time_seconds,omitempty"` // For async queue mode
 	PageCount             int                           `json:"page_count"`
 	Classification        map[string]any                `json:"classification"`
 	Segments              []AISegmentResult             `json:"segments"`
@@ -126,7 +129,24 @@ type AIExtractionResult struct {
 	ExtractionAttempted   bool                          `json:"extraction_attempted"`
 	PipelineVersion       string                        `json:"pipeline_version,omitempty"`
 	ErrorCode             string                        `json:"error_code"`
+	Error                 string                        `json:"error,omitempty"` // For async queue errors
 	RawPayload            json.RawMessage               `json:"-"`
+}
+
+// AIJobStatusResponse represents response from /v1/extract/pipeline/status/{job_id}
+type AIJobStatusResponse struct {
+	JobID       string                 `json:"job_id"`
+	DocumentID  string                 `json:"document_id"`
+	Status      string                 `json:"status"` // QUEUED, PROCESSING, COMPLETED, FAILED
+	CreatedAt   string                 `json:"created_at"`
+	StartedAt   string                 `json:"started_at,omitempty"`
+	CompletedAt string                 `json:"completed_at,omitempty"`
+	Filename    string                 `json:"filename"`
+	Message     string                 `json:"message,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	ErrorDetail string                 `json:"error_detail,omitempty"`
+	RetryCount  int                    `json:"retry_count,omitempty"`
+	Result      *AIExtractionResult    `json:"result,omitempty"` // Only present when COMPLETED
 }
 
 // Resource handles document business logic, AI extraction, and file storage
@@ -215,9 +235,6 @@ func (r *Resource) extractViaAI(ctx context.Context, filename, declaredDocumentT
 	// The hash is stable for retries and lets ai-service correlate logs without
 	// making it responsible for business persistence or idempotency.
 	req.Header.Set("X-Correlation-ID", fmt.Sprintf("sha256:%x", sha256.Sum256(fileBytes)))
-	// Force asynchronous execution for long-running processing
-	req.Header.Set("X-Appwrite-Response-Format", "1.4.0")
-	req.Header.Set("X-Appwrite-Trigger", "http")
 	// Preserve HTTP Basic auth from AI_SERVICE_URL if embedded (e.g., https://user:pass@host)
 	// Go's http.Client extracts and uses it automatically via URL parsing
 
@@ -244,6 +261,18 @@ func (r *Resource) extractViaAI(ctx context.Context, filename, declaredDocumentT
 	if result.Status == "" {
 		return nil, fmt.Errorf("decode ai-service pipeline/full response: missing status")
 	}
+
+	// Handle async job queue mode: poll for completion if response has job_id
+	if result.JobID != "" && result.Status == "QUEUED" {
+		// AI service is using async mode with job queue
+		// Poll status endpoint until completion
+		finalResult, err := r.pollJobStatus(ctx, result.JobID)
+		if err != nil {
+			return nil, fmt.Errorf("poll job status: %w", err)
+		}
+		result = *finalResult
+	}
+
 	if err := validateAIResult(&result); err != nil {
 		return nil, err
 	}
@@ -265,6 +294,112 @@ func (r *Resource) extractViaAI(ctx context.Context, filename, declaredDocumentT
 	}
 
 	return &result, nil
+}
+
+// pollJobStatus polls AI service job status endpoint until completion or timeout
+func (r *Resource) pollJobStatus(ctx context.Context, jobID string) (*AIExtractionResult, error) {
+	const (
+		pollInterval  = 3 * time.Second  // Poll every 3 seconds
+		maxPollTime   = 180 * time.Second // Max 3 minutes polling (enough for heavy OCR)
+		initialDelay  = 2 * time.Second   // Wait 2s before first poll (give queue time to start)
+	)
+
+	statusURL := fmt.Sprintf("%s/v1/extract/pipeline/status/%s", r.aiServiceURL, jobID)
+	startTime := time.Now()
+
+	// Initial delay before first poll
+	select {
+	case <-time.After(initialDelay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		// Check timeout
+		if time.Since(startTime) > maxPollTime {
+			return nil, fmt.Errorf("job polling timeout after %v (job_id: %s)", maxPollTime, jobID)
+		}
+
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		// Poll status
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create status request: %w", err)
+		}
+
+		resp, err := r.aiHTTPClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("status request failed: %w", err)
+		}
+
+		if resp.StatusCode >= 300 {
+			respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+			resp.Body.Close()
+			return nil, fmt.Errorf("status request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
+		}
+
+		var statusResp AIJobStatusResponse
+		if err := json.NewDecoder(resp.Body).Decode(&statusResp); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decode status response: %w", err)
+		}
+		resp.Body.Close()
+
+		switch statusResp.Status {
+		case "COMPLETED":
+			// Job completed successfully
+			if statusResp.Result == nil {
+				return nil, fmt.Errorf("job completed but no result returned (job_id: %s)", jobID)
+			}
+			// Preserve raw payload for downstream consumers
+			if statusResp.Result.RawPayload == nil && len(statusResp.Result.RawExtractedFields) > 0 {
+				// Reconstruct minimal payload if not present
+				statusResp.Result.RawPayload = statusResp.Result.RawExtractedFields
+			}
+			return statusResp.Result, nil
+
+		case "FAILED":
+			// Job failed
+			errMsg := statusResp.Error
+			if errMsg == "" {
+				errMsg = statusResp.Message
+			}
+			if errMsg == "" {
+				errMsg = "unknown error"
+			}
+			return nil, fmt.Errorf("job failed: %s (job_id: %s, retries: %d)", errMsg, jobID, statusResp.RetryCount)
+
+		case "PROCESSING":
+			// Still processing, continue polling
+			// Log progress if available
+			elapsed := time.Since(startTime)
+			_ = elapsed // Can log this for debugging
+
+		case "QUEUED":
+			// Still in queue, continue polling
+			// No action needed
+
+		default:
+			return nil, fmt.Errorf("unexpected job status: %s (job_id: %s)", statusResp.Status, jobID)
+		}
+
+		// Wait for next poll interval
+		select {
+		case <-ticker.C:
+			continue
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // Upload processes a document into a reviewable AI mapping. Reconciliation is
